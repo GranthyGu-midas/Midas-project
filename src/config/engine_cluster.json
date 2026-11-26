@@ -1,0 +1,8 @@
+{
+  "router_admin_port": 7110,
+  "supervisor_port": 7111,
+  "shards": {
+    "1": {"market": 9201, "A": {"order": 7201, "control": 7401, "market": 9301}, "B": {"order": 7301, "control": 7501, "market": 9401}},
+    "2": {"market": 9202, "A": {"order": 7202, "control": 7402, "market": 9302}, "B": {"order": 7302, "control": 7502, "market": 9402}}
+  }
+}
