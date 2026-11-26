@@ -38,8 +38,10 @@ MatchingEngine::MatchingEngine(const OrderConfig& config, std::uint16_t shard)
     auto& book = books_.back();
     put_string(book.symbol, product.symbol);
     book.symbol_id = static_cast<std::uint16_t>(i + 1);
-    book.lower = static_cast<std::int64_t>(product.previous_close) * 90 / 100;
-    book.upper = static_cast<std::int64_t>(product.previous_close) * 110 / 100;
+    if (product.price_tick <= 0 || product.quantity_step <= 0)
+      throw std::runtime_error("Invalid instrument increments");
+    book.price_tick = product.price_tick;
+    book.quantity_step = product.quantity_step;
     symbols_.emplace(std::string_view(book.symbol, product.symbol.size()), books_.size() - 1);
   }
   usernames_.resize(config.accounts.size() + 1);
@@ -151,8 +153,11 @@ void MatchingEngine::restore(std::span<const persistence::StoredOrder> orders,
     o.state = stored.state;
     o.user = static_cast<std::uint32_t>(user - usernames_.begin());
     o.book = &books_[found->second];
-    if (o.state.price < o.book->lower || o.state.price > o.book->upper)
-      throw std::runtime_error("Recovered order outside configured price limits");
+    if (!valid_active_order(o.state) || o.state.price % o.book->price_tick ||
+        o.state.originalQuantity % o.book->quantity_step ||
+        o.state.filledQuantity % o.book->quantity_step ||
+        o.state.canceledQuantity % o.book->quantity_step)
+      throw std::runtime_error("Invalid recovered order or instrument increment");
     rest(o);
   }
   next_order_ = next_order;
@@ -206,11 +211,12 @@ void MatchingEngine::replicate(std::span<const persistence::Change> changes,
 void MatchingEngine::update(const Order& order,
                             RequestId request,
                             const LinkHeader& context,
-                            Timestamp time) {
+                            Timestamp time, UpdateReason reason) {
   OrderUpdate record{};
   record.header = {MessageType::OrderUpdate, sizeof(record), request};
   record.timestamp = time ? time : unix_ns();
   record.order = order.state;
+  record.reason = reason;
   auto destination = context;
   destination.user = order.user;
   queue(LinkKind::Event, destination, record);
@@ -240,13 +246,25 @@ void MatchingEngine::new_order(const LinkHeader& h, const NewOrderRequest& reque
   const auto found = symbols_.find(
       std::string_view(request.symbol, static_cast<std::size_t>(end - request.symbol)));
   if (found == symbols_.end() || (request.side != Side::Buy && request.side != Side::Sell) ||
-      request.price <= 0 || request.quantity <= 0 || request.price < books_[found->second].lower ||
-      request.price > books_[found->second].upper || next_order_ > sequence_limit ||
+      request.price <= 0 || request.quantity <= 0 ||
+      request.price % books_[found->second].price_tick ||
+      request.quantity % books_[found->second].quantity_step ||
+      request.timeInForce != TimeInForce::GTC ||
+      next_order_ > sequence_limit ||
       next_trade_ > sequence_limit) {
     queue(LinkKind::Event, h, rejected(request.header.requestId, RejectReason::InvalidOrder));
     return;
   }
   auto& book = books_[found->second];
+  const auto& same_side = request.side == Side::Buy ? book.bids : book.asks;
+  const Price limit_price = request.price;
+  const auto level = same_side.find(limit_price);
+  if (request.timeInForce == TimeInForce::GTC && level != same_side.end() &&
+      level->second.quantity > std::numeric_limits<std::uint64_t>::max() -
+                               static_cast<std::uint64_t>(request.quantity)) {
+    queue(LinkKind::Event, h, rejected(request.header.requestId, RejectReason::InvalidOrder));
+    return;
+  }
   Order incoming{};
   incoming.user = h.user;
   incoming.book = &book;
@@ -256,6 +274,7 @@ void MatchingEngine::new_order(const LinkHeader& h, const NewOrderRequest& reque
   incoming.state.price = request.price;
   incoming.state.originalQuantity = incoming.state.remainingQuantity = request.quantity;
   incoming.state.status = OrderStatus::Accepted;
+  incoming.state.timeInForce = request.timeInForce;
   update(incoming, request.header.requestId, h);
   match(incoming, request.side == Side::Buy ? book.asks : book.bids);
   if (incoming.state.remainingQuantity)
@@ -320,6 +339,11 @@ void MatchingEngine::rest(const Order& incoming) {
   const auto [position, inserted] = levels.try_emplace(price);
   (void)inserted;
   auto& level = position->second;
+  if (level.quantity > std::numeric_limits<std::uint64_t>::max() -
+                       static_cast<std::uint64_t>(order->state.remainingQuantity)) {
+    pool_.release(order);
+    throw std::overflow_error("Price level aggregate overflow");
+  }
   active_.insert(order->state.orderId, order);
   order->position = position;
   order->prev = level.tail;
@@ -357,7 +381,7 @@ void MatchingEngine::unlink(Order& order) {
   --user_order_counts_[order.user];
 }
 
-void MatchingEngine::cancel(const LinkHeader& h, const CancelRequest& request) {
+void MatchingEngine::cancel(const LinkHeader& h, const CancelRequest& request, UpdateReason reason) {
   auto* order = active_.find(request.orderId);
   if (!order || order->user != h.user) {
     queue(LinkKind::Event, h, rejected(request.header.requestId, RejectReason::CancelFailed));
@@ -369,9 +393,10 @@ void MatchingEngine::cancel(const LinkHeader& h, const CancelRequest& request) {
   unlink(*order);
   if (!position->second.count)
     levels.erase(position);
+  order->state.canceledQuantity += order->state.remainingQuantity;
   order->state.remainingQuantity = 0;
   order->state.status = OrderStatus::Canceled;
-  update(*order, request.header.requestId, h);
+  update(*order, request.header.requestId, h, 0, reason);
   change(*order, true);
   active_.erase(request.orderId);
   pool_.release(order);

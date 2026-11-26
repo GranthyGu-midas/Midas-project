@@ -61,7 +61,8 @@ class MatchingEngine final : public EngineBackend {
 
     SymbolName symbol{};
     std::uint16_t symbol_id = 0;
-    std::int64_t lower = 0, upper = 0;
+    Price price_tick = 1;
+    Quantity quantity_step = 1;
     Levels bids, asks;
   };
 
@@ -105,10 +106,10 @@ class MatchingEngine final : public EngineBackend {
   std::vector<Event> outgoing_;  // Reused by the single command thread.
   template <typename T>
   void queue(LinkKind, const LinkHeader&, const T&);
-  void update(const Order&, RequestId, const LinkHeader&, Timestamp = 0);
+  void update(const Order&, RequestId, const LinkHeader&, Timestamp = 0, UpdateReason = UpdateReason::Normal);
   void trade(const Order&, TradeId, Price, Quantity, Timestamp);
   void new_order(const LinkHeader&, const NewOrderRequest&);
-  void cancel(const LinkHeader&, const CancelRequest&);
+  void cancel(const LinkHeader&, const CancelRequest&, UpdateReason = UpdateReason::UserCancel);
   void snapshot(const LinkHeader&, const Header&);
   void match(Order&, Levels&);
   void rest(const Order&);
