@@ -374,7 +374,7 @@ class Router {
   }
 
   void command(const LinkHeader& h, std::span<const std::uint8_t> bytes) {
-    if (h.kind != LinkKind::NewOrder && h.kind != LinkKind::Cancel &&
+    if (h.kind != LinkKind::NewOrder && h.kind != LinkKind::Cancel && h.kind != LinkKind::Reduce &&
         h.kind != LinkKind::Snapshot && h.kind != LinkKind::History) {
       io.close(front);
       return;
@@ -410,11 +410,12 @@ class Router {
         return;
       }
       target = product->second;
-    } else if (h.kind == LinkKind::Cancel) {
-      const auto order = copy_record<CancelRequest>(bytes);
-      const auto shard = shard_index.find(static_cast<std::uint16_t>(order.orderId >> 48));
+    } else if (h.kind == LinkKind::Cancel || h.kind == LinkKind::Reduce) {
+      const auto order_id = h.kind == LinkKind::Cancel ? copy_record<CancelRequest>(bytes).orderId
+                                                     : copy_record<ReduceRequest>(bytes).orderId;
+      const auto shard = shard_index.find(static_cast<std::uint16_t>(order_id >> 48));
       if (shard == shard_index.end()) {
-        reject(h, wire.requestId, RejectReason::CancelFailed);
+        reject(h, wire.requestId, h.kind == LinkKind::Reduce ? RejectReason::ReduceFailed : RejectReason::CancelFailed);
         return;
       }
       target = shard->second;

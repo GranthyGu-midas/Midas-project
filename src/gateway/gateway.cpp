@@ -235,6 +235,7 @@ class Gateway {
     std::memcpy(&h, bytes.data(), sizeof(h));
     if (h.messageType == MessageType::LoginRequest) {
       const auto login = copy_record<LoginRequest>(bytes);
+      if (login.version != protocol_version) { io.close(id); return; }
       const auto username = fixed_string(login.username), password = fixed_string(login.password);
       const auto found = usernames.find(username);
       if (found == usernames.end() || c.accounts[found->second - 1].password != password) {
@@ -281,6 +282,19 @@ class Gateway {
       submit(id, LinkKind::NewOrder, bytes, h.requestId);
     } else if (h.messageType == MessageType::CancelRequest)
       submit(id, LinkKind::Cancel, bytes, h.requestId);
+    else if (h.messageType == MessageType::ReduceRequest)
+      submit(id, LinkKind::Reduce, bytes, h.requestId);
+    else if (h.messageType == MessageType::InstrumentRequest) {
+      const auto name = fixed_string(copy_record<InstrumentRequest>(bytes).symbol);
+      const auto p = std::find_if(c.products.begin(), c.products.end(), [&](const auto& x) { return x.symbol == name; });
+      if (p == c.products.end()) reply(id, rejected(h.requestId, RejectReason::UnknownInstrument));
+      else {
+        auto value = server_record<InstrumentInfo>(MessageType::InstrumentInfo, h.requestId);
+        put_string(value.symbol, p->symbol);
+        value.priceTick = p->price_tick; value.quantityStep = p->quantity_step;
+        reply(id, value);
+      }
+    }
     else if (h.messageType == MessageType::TradeHistoryRequest)
       submit(id, LinkKind::History, bytes, h.requestId);
     else
@@ -327,11 +341,12 @@ class Gateway {
         return;
       }
       target = route->second;
-    } else if (c.direct && kind == LinkKind::Cancel) {
-      const auto cancel = copy_record<CancelRequest>(bytes);
-      const auto shard = shard_index.find(static_cast<std::uint16_t>(cancel.orderId >> 48));
+    } else if (c.direct && (kind == LinkKind::Cancel || kind == LinkKind::Reduce)) {
+      const auto order_id = kind == LinkKind::Cancel ? copy_record<CancelRequest>(bytes).orderId
+                                                   : copy_record<ReduceRequest>(bytes).orderId;
+      const auto shard = shard_index.find(static_cast<std::uint16_t>(order_id >> 48));
       if (shard == shard_index.end()) {
-        reply(id, rejected(request, RejectReason::CancelFailed));
+        reply(id, rejected(request, kind == LinkKind::Reduce ? RejectReason::ReduceFailed : RejectReason::CancelFailed));
         return;
       }
       target = shard->second;
@@ -442,8 +457,13 @@ class Gateway {
         }
         if (wire.messageType == MessageType::OrderUpdate) {
           const auto update = copy_record<OrderUpdate>(bytes);
-          if (update.order.status !=
-              (p.kind == LinkKind::NewOrder ? OrderStatus::Accepted : OrderStatus::Canceled)) {
+          const bool valid = p.kind == LinkKind::NewOrder
+              ? update.order.status == OrderStatus::Accepted && update.reason == UpdateReason::Normal
+              : p.kind == LinkKind::Reduce
+                  ? update.reason == UpdateReason::Reduced &&
+                    (valid_active_order(update.order) || update.order.status == OrderStatus::Canceled)
+                  : update.order.status == OrderStatus::Canceled && update.reason == UpdateReason::UserCancel;
+          if (!valid) {
             io.close(engine);
             return;
           }

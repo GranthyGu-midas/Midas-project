@@ -80,7 +80,7 @@ void serve_order_engine(EngineBackend& book,
       return;
     }
     if (id != router || h.user > c.accounts.size() ||
-        (h.kind != LinkKind::NewOrder && h.kind != LinkKind::Cancel &&
+        (h.kind != LinkKind::NewOrder && h.kind != LinkKind::Cancel && h.kind != LinkKind::Reduce &&
          h.kind != LinkKind::Snapshot && h.kind != LinkKind::History)) {
       io.close(id);
       return;
