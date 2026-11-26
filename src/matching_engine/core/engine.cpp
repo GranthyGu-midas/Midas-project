@@ -249,7 +249,7 @@ void MatchingEngine::new_order(const LinkHeader& h, const NewOrderRequest& reque
       request.price <= 0 || request.quantity <= 0 ||
       request.price % books_[found->second].price_tick ||
       request.quantity % books_[found->second].quantity_step ||
-      request.timeInForce != TimeInForce::GTC ||
+      (request.timeInForce != TimeInForce::GTC && request.timeInForce != TimeInForce::IOC) ||
       next_order_ > sequence_limit ||
       next_trade_ > sequence_limit) {
     queue(LinkKind::Event, h, rejected(request.header.requestId, RejectReason::InvalidOrder));
@@ -277,6 +277,12 @@ void MatchingEngine::new_order(const LinkHeader& h, const NewOrderRequest& reque
   incoming.state.timeInForce = request.timeInForce;
   update(incoming, request.header.requestId, h);
   match(incoming, request.side == Side::Buy ? book.asks : book.bids);
+  if (incoming.state.remainingQuantity && request.timeInForce == TimeInForce::IOC) {
+    incoming.state.canceledQuantity += incoming.state.remainingQuantity;
+    incoming.state.remainingQuantity = 0;
+    incoming.state.status = OrderStatus::Expired;
+    update(incoming, 0, {0, LinkKind::Event, 0, incoming.user, 0}, 0, UpdateReason::IOC);
+  }
   if (incoming.state.remainingQuantity)
     rest(incoming);
   change(incoming, !incoming.state.remainingQuantity);
