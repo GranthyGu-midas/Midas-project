@@ -96,6 +96,8 @@ void MatchingEngine::command(const LinkHeader& h,
     new_order(h, copy_record<NewOrderRequest>(bytes));
   else if (h.kind == LinkKind::Cancel)
     cancel(h, copy_record<CancelRequest>(bytes));
+  else if (h.kind == LinkKind::Reduce)
+    reduce(h, copy_record<ReduceRequest>(bytes));
   else if (h.kind == LinkKind::Snapshot)
     snapshot(h, copy_record<Header>(bytes));
   else if (h.kind == LinkKind::History)
@@ -406,6 +408,32 @@ void MatchingEngine::cancel(const LinkHeader& h, const CancelRequest& request, U
   change(*order, true);
   active_.erase(request.orderId);
   pool_.release(order);
+}
+
+void MatchingEngine::reduce(const LinkHeader& h, const ReduceRequest& request) {
+  auto* order = active_.find(request.orderId);
+  if (!order || order->user != h.user || request.newTotalQuantity < 0 ||
+      request.newTotalQuantity % order->book->quantity_step ||
+      request.newTotalQuantity < order->state.filledQuantity ||
+      request.newTotalQuantity > order->state.originalQuantity - order->state.canceledQuantity) {
+    queue(LinkKind::Event, h, rejected(request.header.requestId, RejectReason::ReduceFailed));
+    return;
+  }
+  if (request.newTotalQuantity == order->state.filledQuantity) {
+    CancelRequest full{};
+    full.header = request.header;
+    full.orderId = request.orderId;
+    cancel(h, full, UpdateReason::Reduced);
+    return;
+  }
+  const auto remaining = request.newTotalQuantity - order->state.filledQuantity;
+  const auto removed = order->state.remainingQuantity - remaining;
+  order->position->second.quantity -= static_cast<std::uint64_t>(removed);
+  order->state.remainingQuantity = remaining;
+  order->state.canceledQuantity += removed;
+  // In-place reduction retains the order ID and both FIFO links.
+  if (removed) change(*order, false);
+  update(*order, request.header.requestId, h, 0, UpdateReason::Reduced);
 }
 
 std::size_t MatchingEngine::active_order_count(std::uint32_t user) const {

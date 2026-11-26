@@ -110,6 +110,7 @@ class MatchingEngine final : public EngineBackend {
   void trade(const Order&, TradeId, Price, Quantity, Timestamp);
   void new_order(const LinkHeader&, const NewOrderRequest&);
   void cancel(const LinkHeader&, const CancelRequest&, UpdateReason = UpdateReason::UserCancel);
+  void reduce(const LinkHeader&, const ReduceRequest&);
   void snapshot(const LinkHeader&, const Header&);
   void match(Order&, Levels&);
   void rest(const Order&);
