@@ -1,4 +1,5 @@
 #include "shared_data/orders/config.hpp"
+#include "shared_data/orders/decimal.hpp"
 #include <arpa/inet.h>
 #include <algorithm>
 #include <fstream>
@@ -53,7 +54,9 @@ OrderConfig load_order_config(const std::string& path) {
   if (!file)
     throw std::runtime_error("Cannot open order config: " + path);
   OrderConfig c;
-  std::set<std::string> singles, users, symbols;
+  std::set<std::string> singles, users, symbols, instruments;
+  struct Spec { std::string symbol; std::int64_t tick, step; };
+  std::vector<Spec> specs;
   std::set<std::uint16_t> shard_ids;
   std::set<std::pair<std::string, std::uint16_t>> shard_addresses;
   std::string line;
@@ -66,7 +69,7 @@ OrderConfig load_order_config(const std::string& path) {
       throw std::runtime_error("Expected key=value");
     const auto key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
     const auto f = split(value);
-    if (key != "user" && key != "symbol" && key != "shard" && !singles.insert(key).second)
+    if (key != "user" && key != "symbol" && key != "shard" && key != "instrument" && !singles.insert(key).second)
       throw std::runtime_error("Repeated config key");
     if (key == "routing") {
       if (value != "direct" && value != "router")
@@ -91,6 +94,12 @@ OrderConfig load_order_config(const std::string& path) {
       if (!shard_ids.insert(id).second || !shard_addresses.insert({a.host, a.port}).second)
         throw std::runtime_error("Duplicate shard ID/address");
       c.shards.push_back({id, a});
+    } else if (key == "instrument") {
+      if (f.size() != 3 || !instruments.insert(f[0]).second)
+        throw std::runtime_error("Invalid/duplicate instrument specification");
+      const auto tick = parse_decimal(f[1]), step = parse_decimal(f[2]);
+      if (tick <= 0 || step <= 0) throw std::runtime_error("Instrument increments must be positive");
+      specs.push_back({f[0], tick, step});
     } else if (key == "symbol") {
       if (f.size() != 3 || f[0].empty() || f[0].size() > 31 || !symbols.insert(f[0]).second)
         throw std::runtime_error("Invalid/duplicate product");
@@ -130,6 +139,11 @@ OrderConfig load_order_config(const std::string& path) {
   for (const auto& p : c.products)
     if (!shard_ids.contains(p.shard))
       throw std::runtime_error("Unassigned product shard");
+  for (const auto& spec : specs) {
+    const auto p = std::find_if(c.products.begin(), c.products.end(), [&](const auto& x) { return x.symbol == spec.symbol; });
+    if (p == c.products.end()) throw std::runtime_error("Unknown instrument symbol");
+    p->price_tick = spec.tick; p->quantity_step = spec.step;
+  }
   return c;
 }
 }  // namespace marketlab::orders

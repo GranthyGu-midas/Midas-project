@@ -22,8 +22,9 @@ struct EngineShard {
 
 struct Product {
   std::string symbol;
-  std::int32_t previous_close;
+  std::int32_t previous_close;  // Legacy config field; no price band is applied.
   std::uint16_t shard;
+  std::int64_t price_tick = 1, quantity_step = 1;  // Fixed point, scale 1e8.
 };
 
 struct OrderConfig {
