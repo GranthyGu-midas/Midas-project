@@ -1,6 +1,7 @@
 #include "shared_data/runtime/io.hpp"
 #include "shared_data/orders/engine_link.hpp"
 #include "shared_data/orders/config.hpp"
+#include "shared_data/orders/decimal.hpp"
 #include "shared_data/console.hpp"
 
 #include <arpa/inet.h>
@@ -42,14 +43,18 @@ console::Label status(OrderStatus value) {
       return {"FILLED", console::green};
     case OrderStatus::Canceled:
       return {"CANCELED", console::yellow};
+    case OrderStatus::Expired:
+      return {"EXPIRED", console::yellow};
   }
   return {"UNKNOWN", console::red};
 }
 
 void print_order(const OrderState& order) {
   std::cout << "  " << (order.side == Side::Buy ? "BUY " : "SELL ") << fixed_string(order.symbol)
-            << "  qty=" << order.originalQuantity << "  price=" << order.price
-            << "  filled=" << order.filledQuantity << "  remaining=" << order.remainingQuantity
+            << "  qty=" << format_decimal(order.originalQuantity) << "  price=" << format_decimal(order.price)
+            << "  filled=" << format_decimal(order.filledQuantity) << "  remaining=" << format_decimal(order.remainingQuantity)
+            << "  canceled=" << format_decimal(order.canceledQuantity)
+            << "  tif=" << (order.timeInForce == TimeInForce::IOC ? "IOC" : "GTC")
             << "  order=" << order.orderId;
 }
 
@@ -59,6 +64,8 @@ void print_time(Timestamp timestamp) {
 
 const char* rejection(RejectReason reason) {
   switch (reason) {
+    case RejectReason::ReduceFailed: return "Reduction invalid, order ended, or not owned by you";
+    case RejectReason::UnknownInstrument: return "Unknown instrument";
     case RejectReason::InvalidCredentials:
       return "Invalid username or password";
     case RejectReason::InvalidOrder:
@@ -78,8 +85,10 @@ const char* rejection(RejectReason reason) {
 void help() {
   std::cout
       << "\nCommands (one command per line):\n"
-      << "  buy SYMBOL PRICE QUANTITY  : place a buy limit order, e.g. buy AAPL 100 10\n"
-      << "  sell SYMBOL PRICE QUANTITY : place a sell limit order; prices/quantities are integers\n"
+      << "  buy SYMBOL PRICE QTY [GTC|IOC]  : e.g. buy BTC 100.25 0.01234567 IOC\n"
+      << "  sell SYMBOL PRICE QTY [GTC|IOC] : decimal limit order; default GTC\n"
+      << "  reduce ORDER_ID NEW_TOTAL_QTY  : lower total including fills; retains FIFO\n"
+      << "  instrument SYMBOL              : query price tick and quantity step\n"
       << "  cancel ORDER_ID            : cancel your remaining open quantity using the displayed order ID\n"
       << "  cancel-last                : cancel the last order accepted during this client session\n"
       << "  trades                     : list all your trades: time, side, symbol, quantity, price and trade ID\n"
@@ -308,13 +317,31 @@ class Console {
         send(query, MessageType::TradeHistoryRequest);
         return true;
       }
-      if ((op == "buy" || op == "sell") && args.size() == 3) {
+      if ((op == "buy" || op == "sell") && (args.size() == 3 || args.size() == 4)) {
         NewOrderRequest value{};
         put_string(value.symbol, args[0]);
         value.side = op == "buy" ? Side::Buy : Side::Sell;
-        value.price = number<Price>(args[1]);
-        value.quantity = number<Quantity>(args[2]);
+        value.price = parse_decimal(args[1]);
+        value.quantity = parse_decimal(args[2]);
+        if (value.price <= 0 || value.quantity <= 0) throw std::runtime_error("Price and quantity must be positive");
+        if (args.size() == 4) {
+          if (args[3] != "GTC" && args[3] != "IOC") throw std::runtime_error("Expected GTC or IOC");
+          value.timeInForce = args[3] == "IOC" ? TimeInForce::IOC : TimeInForce::GTC;
+        }
         send(value, MessageType::NewOrderRequest);
+        return true;
+      }
+      if (op == "reduce" && args.size() == 2) {
+        ReduceRequest value{};
+        value.orderId = number<OrderId>(args[0]);
+        value.newTotalQuantity = parse_decimal(args[1]);
+        send(value, MessageType::ReduceRequest);
+        return true;
+      }
+      if (op == "instrument" && args.size() == 1) {
+        InstrumentRequest value{};
+        put_string(value.symbol, args[0]);
+        send(value, MessageType::InstrumentRequest);
         return true;
       }
       if ((op == "cancel" && args.size() == 1) || (op == "cancel-last" && args.empty())) {
@@ -370,7 +397,17 @@ class Console {
     std::memcpy(&exchange_time, bytes.data() + sizeof(Header), sizeof(exchange_time));
     switch (h.messageType) {
       case MessageType::LoginAccepted:
+        if (copy_record<LoginAccepted>(bytes).version != protocol_version)
+          throw std::runtime_error("Unsupported server protocol version");
         break;
+      case MessageType::InstrumentInfo: {
+        const auto value = copy_record<InstrumentInfo>(bytes);
+        std::cout << "INSTRUMENT " << fixed_string(value.symbol)
+                  << " price_tick=" << format_decimal(value.priceTick)
+                  << " qty_step=" << format_decimal(value.quantityStep) << " scale=100000000\n";
+        complete = true;
+        break;
+      }
       case MessageType::ActiveOrderSnapshot: {
         const auto value = copy_record<ActiveOrderSnapshot>(bytes);
         if (value.isEnd) {
@@ -388,10 +425,14 @@ class Console {
       case MessageType::OrderUpdate: {
         const auto value = copy_record<OrderUpdate>(bytes);
         print_time(exchange_time);
-        std::cout << status(value.order.status);
+        const char* reason = value.reason == UpdateReason::Reduced ? "REDUCED"
+                           : value.reason == UpdateReason::SelfTradePrevention ? "STP_DC"
+                           : value.reason == UpdateReason::IOC ? "IOC"
+                           : value.reason == UpdateReason::UserCancel ? "USER_CANCEL" : "NORMAL";
+        std::cout << status(value.order.status) << " reason=" << reason;
         print_order(value.order);
         std::cout << '\n';
-        if (value.order.status == OrderStatus::Accepted)
+        if (value.order.status == OrderStatus::Accepted && value.reason == UpdateReason::Normal && h.requestId)
           last_order_ = value.order.orderId;
         complete = h.requestId != 0;
         break;
@@ -401,7 +442,7 @@ class Console {
         print_time(exchange_time);
         std::cout << console::Label{"TRADE", console::magenta} << "  "
                   << (value.side == Side::Buy ? "BUY " : "SELL ") << fixed_string(value.symbol)
-                  << "  qty=" << value.quantity << "  price=" << value.price
+                  << "  qty=" << format_decimal(value.quantity) << "  price=" << format_decimal(value.price)
                   << "  trade=" << value.tradeId << "  order=" << value.orderId << '\n';
         break;
       }
@@ -441,7 +482,7 @@ class Console {
                 : buying          ? "BUY"
                                   : "SELL")
             << "  " << std::setw(12) << fixed_string(value.symbol) << "  " << std::right
-            << std::setw(8) << value.quantity << "  " << std::setw(10) << value.price << "  "
+            << std::setw(8) << format_decimal(value.quantity) << "  " << std::setw(10) << format_decimal(value.price) << "  "
             << value.tradeId;
         std::cout << console::Label{"TRADE", console::magenta} << ' ' << row.str() << '\n';
         break;
@@ -490,7 +531,7 @@ class Console {
         std::cout << console::green << "READY (type help for commands)" << console::reset << '\n';
         if (!recovered)
           std::cout
-              << "Commands: buy | sell | cancel | cancel-last | trades | relogin | help | quit\n";
+              << "Commands: buy | sell | reduce | cancel | cancel-last | instrument | trades | relogin | help | quit\n";
       }
       if (history_) {
         history_fanout_ = false;
