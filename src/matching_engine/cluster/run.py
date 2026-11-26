@@ -320,6 +320,17 @@ class Cluster:
                 status = worker_status(destination.call(b"apply\n" + chunk))
                 source_status = worker_status(source.call("status"))
                 lag = source_status["seq"] - status["seq"]
+                if lag <= 256 and not status["idle"]:
+                    # Applying a batch commits its log before the asynchronous
+                    # history index catches up. Give that fixed boundary a short
+                    # drain window instead of immediately moving it again.
+                    idle_deadline = min(deadline, time.monotonic() + 0.1)
+                    while not status["idle"] and time.monotonic() < idle_deadline:
+                        if self.stop.wait(0.005):
+                            raise InterruptedError("cluster is stopping")
+                        status = worker_status(destination.call("status"))
+                    source_status = worker_status(source.call("status"))
+                    lag = source_status["seq"] - status["seq"]
                 if time.monotonic() - last_log >= 0.5:
                     log("SYNC_PROGRESS", shard=shard, source_seq=source_status["seq"],
                         standby_seq=status["seq"], lag=lag, history_ready=status["idle"])
