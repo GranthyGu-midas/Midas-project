@@ -59,8 +59,8 @@ void name(Bytes& out, const char* n) {
   out.insert(out.end(), n, n + 32);
 }
 
-std::int32_t signed32(Reader& r) {
-  return std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(r.number(4)));
+std::int64_t signed64(Reader& r) {
+  return std::bit_cast<std::int64_t>(r.number(8));
 }
 }  // namespace
 
@@ -69,11 +69,13 @@ void encode_order(Bytes& out, const StoredOrder& o) {
   integer(out, s.orderId, 8);
   name(out, s.symbol);
   integer(out, static_cast<unsigned>(s.side), 1);
-  integer(out, static_cast<std::uint32_t>(s.price), 4);
-  integer(out, s.originalQuantity, 4);
-  integer(out, s.filledQuantity, 4);
-  integer(out, s.remainingQuantity, 4);
+  integer(out, static_cast<std::uint64_t>(s.price), 8);
+  integer(out, s.originalQuantity, 8);
+  integer(out, s.filledQuantity, 8);
+  integer(out, s.remainingQuantity, 8);
   integer(out, static_cast<unsigned>(s.status), 1);
+  integer(out, s.canceledQuantity, 8);
+  integer(out, static_cast<unsigned>(s.timeInForce), 1);
   name(out, o.username.data());
   integer(out, o.arrival, 8);
 }
@@ -85,18 +87,16 @@ StoredOrder decode_order(Reader& r) {
   const auto symbol = r.name();
   std::copy(symbol.begin(), symbol.end(), s.symbol);
   s.side = static_cast<Side>(r.number(1));
-  s.price = signed32(r);
-  s.originalQuantity = signed32(r);
-  s.filledQuantity = signed32(r);
-  s.remainingQuantity = signed32(r);
+  s.price = signed64(r);
+  s.originalQuantity = signed64(r);
+  s.filledQuantity = signed64(r);
+  s.remainingQuantity = signed64(r);
   s.status = static_cast<OrderStatus>(r.number(1));
+  s.canceledQuantity = signed64(r);
+  s.timeInForce = static_cast<TimeInForce>(r.number(1));
   o.username = r.name();
   o.arrival = r.number(8);
-  if (!s.orderId || !o.arrival || s.price <= 0 || s.originalQuantity <= 0 || s.filledQuantity < 0 ||
-      s.remainingQuantity <= 0 ||
-      std::int64_t(s.filledQuantity) + s.remainingQuantity != s.originalQuantity ||
-      (s.side != Side::Buy && s.side != Side::Sell) ||
-      s.status != (s.filledQuantity ? OrderStatus::PartiallyFilled : OrderStatus::Accepted))
+  if (!o.arrival || !valid_active_order(s))
     throw std::runtime_error("Invalid persisted active order");
   return o;
 }
@@ -105,8 +105,8 @@ void encode_trade(Bytes& out, const TradeRecord& t) {
   integer(out, t.id, 8);
   integer(out, t.timestamp, 8);
   name(out, t.symbol.data());
-  integer(out, static_cast<std::uint32_t>(t.price), 4);
-  integer(out, t.quantity, 4);
+  integer(out, static_cast<std::uint64_t>(t.price), 8);
+  integer(out, t.quantity, 8);
   integer(out, t.buy_order, 8);
   integer(out, t.sell_order, 8);
   name(out, t.buyer.data());
@@ -118,8 +118,8 @@ TradeRecord decode_trade(Reader& r) {
   t.id = r.number(8);
   t.timestamp = r.number(8);
   t.symbol = r.name();
-  t.price = signed32(r);
-  t.quantity = signed32(r);
+  t.price = signed64(r);
+  t.quantity = signed64(r);
   t.buy_order = r.number(8);
   t.sell_order = r.number(8);
   t.buyer = r.name();

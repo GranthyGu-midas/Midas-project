@@ -90,7 +90,7 @@ bool HistoryStore::restore(std::uint64_t recovered_end) {
       throw std::runtime_error("short index checkpoint");
     const auto bytes = snapshot.read(snapshot.size() - footer_size, footer_size);
     Reader meta{bytes};
-    if (meta.number(8) != snapshot_magic || meta.number(8) != 2 || meta.number(8) != fingerprint_)
+    if (meta.number(8) != snapshot_magic || meta.number(8) != 3 || meta.number(8) != fingerprint_)
       throw std::runtime_error("incompatible index checkpoint");
     const auto end = meta.number(8), last_frame = meta.number(8), first_crc = meta.number(8),
                last_crc = meta.number(8);
@@ -141,7 +141,7 @@ void HistoryStore::checkpoint(std::uint64_t end) {
   const auto pages_crc = copy_pages(source, destination, page_bytes);
   Bytes footer;
   for (const std::uint64_t v : {snapshot_magic,
-                                std::uint64_t{2},
+                                std::uint64_t{3},
                                 fingerprint_,
                                 end,
                                 last_frame_,
@@ -321,7 +321,7 @@ void HistoryStore::query_worker() {
             if (window.empty() || offset < window_at ||
                 offset - window_at + stored_trade_bytes > window.size()) {
               // Coalesce nearby positions into at most 8 KiB. Sparse values
-              // still read only their own 136-byte record, not a whole frame.
+              // still read only their own 144-byte record, not a whole frame.
               window_at = offset;
               auto end = offset + stored_trade_bytes;
               for (std::size_t i = next_position + 1; i < positions.size(); ++i) {

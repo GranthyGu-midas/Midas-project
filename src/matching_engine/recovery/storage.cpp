@@ -15,13 +15,14 @@ std::uint64_t fingerprint(const OrderConfig& c, std::uint16_t shard) {
     h ^= 255;
     h *= 1099511628211ULL;
   };
-  add("parallel-v2");
+  add("parallel-v3-fixed8-dc");
   add(std::to_string(shard));
   for (const auto& u : c.accounts)
     add(u.name);
   for (const auto& p : c.products) {
     add(p.symbol);
-    add(std::to_string(p.previous_close));
+    add(std::to_string(p.price_tick));
+    add(std::to_string(p.quantity_step));
     add(std::to_string(p.shard));
   }
   return h;

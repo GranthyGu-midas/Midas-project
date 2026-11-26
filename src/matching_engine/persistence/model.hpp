@@ -25,6 +25,8 @@ struct CompactOrder {
   Quantity original = 0;
   Quantity filled = 0;
   Quantity remaining = 0;
+  Quantity canceled = 0;
+  TimeInForce tif = TimeInForce::GTC;
   std::uint32_t user = 0;
   std::uint16_t symbol = 0;
   Side side{};
@@ -41,6 +43,8 @@ inline CompactOrder compact_order(const OrderState& state,
           state.originalQuantity,
           state.filledQuantity,
           state.remainingQuantity,
+          state.canceledQuantity,
+          state.timeInForce,
           user,
           symbol,
           state.side,

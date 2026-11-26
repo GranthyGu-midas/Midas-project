@@ -87,7 +87,7 @@ class SqliteIndex {
       auto offset = static_cast<std::uint64_t>(sqlite3_column_int64(query_.get(), 0));
       auto ordinal = static_cast<std::uint32_t>(sqlite3_column_int64(query_.get(), 1));
       auto crc = static_cast<std::uint32_t>(sqlite3_column_int64(query_.get(), 2));
-      result.push_back({offset - 48 - static_cast<std::uint64_t>(ordinal) * 136, ordinal, crc});
+      result.push_back({offset - 48 - static_cast<std::uint64_t>(ordinal) * 144, ordinal, crc});
     }
     sqlite3_reset(query_.get());
     check(rc, SQLITE_DONE);

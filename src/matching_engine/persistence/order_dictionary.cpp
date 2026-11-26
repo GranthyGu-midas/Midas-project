@@ -59,6 +59,8 @@ StoredOrder OrderDictionary::expand(const CompactOrder& order) const {
   state.originalQuantity = order.original;
   state.filledQuantity = order.filled;
   state.remainingQuantity = order.remaining;
+  state.canceledQuantity = order.canceled;
+  state.timeInForce = order.tif;
   state.status = order.status;
   result.username = users_.at(order.user);
   result.arrival = order.arrival;

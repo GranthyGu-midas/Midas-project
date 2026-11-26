@@ -14,14 +14,14 @@ struct UserComparator {
 
 // Logical leaf key: 4-byte user ID. One entry per participant per trade.
 // Frame + ordinal locate the canonical record. A derived per-record CRC lets
-// sparse queries verify 136 bytes instead of reading an entire matching batch.
+// sparse queries verify 144 bytes instead of reading an entire matching batch.
 struct TradePosition {
   std::uint64_t frame = 0;
   std::uint32_t ordinal = 0;
   std::uint32_t checksum = 0;
 
   std::uint64_t Get() const {
-    return frame + 48 + static_cast<std::uint64_t>(ordinal) * 136;
+    return frame + 48 + static_cast<std::uint64_t>(ordinal) * 144;
   }
 
   bool operator==(const TradePosition&) const = default;
