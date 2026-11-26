@@ -1,1 +1,6 @@
 /docs
+/build/
+/data/
+**/.marketlab-data/
+__pycache__/
+.DS_Store

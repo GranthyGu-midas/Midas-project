@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.20)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(marketlab_gateway LANGUAGES CXX)
+endif()
+include(../CMakeLists.txt)
+
+add_library(marketlab_gateway STATIC gateway.cpp)
+target_link_libraries(marketlab_gateway PUBLIC marketlab_order_link)
+add_executable(market_gateway main.cpp)
+target_link_libraries(market_gateway PRIVATE marketlab_gateway)
+foreach(target marketlab_gateway market_gateway)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+endforeach()

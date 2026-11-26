@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.20)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(marketlab_matching_engine LANGUAGES CXX)
+endif()
+include(../CMakeLists.txt)
+add_subdirectory(trade_history/index)
+
+add_library(marketlab_matching_core STATIC core/engine.cpp market_data/snapshot_mailbox.cpp
+  persistence/codec.cpp persistence/files.cpp persistence/durable_engine.cpp
+  persistence/order_dictionary.cpp
+  recovery/state.cpp recovery/storage.cpp)
+target_sources(marketlab_matching_core PRIVATE trade_history/history_store.cpp)
+target_link_libraries(marketlab_matching_core PUBLIC marketlab_bpt)
+target_link_libraries(marketlab_matching_core PUBLIC marketlab_order_link marketlab_market_data_link)
+add_library(marketlab_matching_runtime STATIC runtime/server.cpp cluster/rpc.cpp cluster/worker.cpp)
+target_link_libraries(marketlab_matching_runtime PUBLIC marketlab_matching_core)
+add_executable(market_matching_engine runtime/main.cpp)
+target_link_libraries(market_matching_engine PRIVATE marketlab_matching_runtime)
+add_executable(market_engine_router cluster/main.cpp cluster/router.cpp)
+target_link_libraries(market_engine_router PRIVATE marketlab_matching_runtime)
+foreach(target marketlab_matching_core marketlab_matching_runtime market_matching_engine market_engine_router)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+endforeach()

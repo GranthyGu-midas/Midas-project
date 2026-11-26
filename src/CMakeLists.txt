@@ -1,0 +1,40 @@
+cmake_minimum_required(VERSION 3.20)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_LIST_DIR)
+  project(marketlab_exchange LANGUAGES CXX)
+endif()
+
+# Shared setup is also included by each independently buildable component.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+foreach(kind RUNTIME ARCHIVE LIBRARY)
+  if(NOT CMAKE_${kind}_OUTPUT_DIRECTORY)
+    if(kind STREQUAL "RUNTIME")
+      set(CMAKE_${kind}_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    else()
+      set(CMAKE_${kind}_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+    endif()
+  endif()
+endforeach()
+get_filename_component(MARKETLAB_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
+find_package(Threads REQUIRED)
+if(NOT TARGET marketlab_order_link)
+  add_subdirectory("${MARKETLAB_SOURCE_DIR}/shared_data" "${CMAKE_BINARY_DIR}/shared_data" EXCLUDE_FROM_ALL)
+endif()
+
+# An include from a component supplies shared settings without building siblings.
+if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL MARKETLAB_SOURCE_DIR)
+  return()
+endif()
+
+add_subdirectory(client)
+add_subdirectory(gateway)
+add_subdirectory(matching_engine)
+add_subdirectory(publisher)
+
+# Normal builds contain runtime code only; demonstration and recovery tests are opt-in.
+option(MARKETLAB_BUILD_TESTS "Build demonstration, mailbox and recovery tests" OFF)
+if(MARKETLAB_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory("${MARKETLAB_SOURCE_DIR}/../tests" "${CMAKE_BINARY_DIR}/tests")
+endif()
