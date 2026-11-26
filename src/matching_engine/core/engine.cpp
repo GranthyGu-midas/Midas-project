@@ -301,6 +301,28 @@ void MatchingEngine::match(Order& incoming, Levels& opposite) {
     const Quantity incoming_remaining = incoming.state.remainingQuantity;
     const Quantity resting_remaining = resting->state.remainingQuantity;
     const Quantity quantity = std::min(incoming_remaining, resting_remaining);
+    // Coinbase default dc: remove equal size from both orders without a trade.
+    if (incoming.user == resting->user) {
+      const auto time = unix_ns();
+      for (auto* order : {&incoming, resting}) {
+        order->state.remainingQuantity -= quantity;
+        order->state.canceledQuantity += quantity;
+        order->state.status = order->state.remainingQuantity
+            ? (order->state.filledQuantity ? OrderStatus::PartiallyFilled : OrderStatus::Accepted)
+            : OrderStatus::Canceled;
+        update(*order, 0, {0, LinkKind::Event, 0, order->user, 0}, time,
+               UpdateReason::SelfTradePrevention);
+      }
+      change(*resting, !resting->state.remainingQuantity);
+      best->second.quantity -= static_cast<std::uint64_t>(quantity);
+      if (!resting->state.remainingQuantity) {
+        unlink(*resting);
+        active_.erase(resting->state.orderId);
+        pool_.release(resting);
+        if (!best->second.count) opposite.erase(best);
+      }
+      continue;
+    }
     const auto id = allocate(shard_, next_trade_);
     const auto time = unix_ns();
     if (capture_) {
