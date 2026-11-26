@@ -113,3 +113,9 @@ add_test(NAME client_reconnect_process
 set_tests_properties(client_reconnect_process PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE
   LABELS "client;publisher;integration;correctness")
 add_dependencies(demo_tests gateway_client)
+
+add_executable(coinbase_semantics_tests coinbase/semantics.cpp)
+target_link_libraries(coinbase_semantics_tests PRIVATE marketlab_matching_core)
+target_compile_options(coinbase_semantics_tests PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME coinbase_semantics COMMAND coinbase_semantics_tests "${CMAKE_BINARY_DIR}/coinbase-results")
+set_tests_properties(coinbase_semantics PROPERTIES TIMEOUT 90 LABELS "engine;recovery;correctness")
