@@ -119,3 +119,7 @@ target_link_libraries(coinbase_semantics_tests PRIVATE marketlab_matching_core)
 target_compile_options(coinbase_semantics_tests PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME coinbase_semantics COMMAND coinbase_semantics_tests "${CMAKE_BINARY_DIR}/coinbase-results")
 set_tests_properties(coinbase_semantics PROPERTIES TIMEOUT 90 LABELS "engine;recovery;correctness")
+add_test(NAME coinbase_process
+  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/coinbase/process.py"
+    "$<TARGET_FILE_DIR:market_matching_engine>" "${CMAKE_BINARY_DIR}/coinbase-process-results")
+set_tests_properties(coinbase_process PROPERTIES TIMEOUT 150 RUN_SERIAL TRUE LABELS "client;publisher;recovery;integration;correctness")
