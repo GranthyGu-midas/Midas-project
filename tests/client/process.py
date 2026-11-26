@@ -15,7 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 HEADER = struct.Struct("<HIQ")
-STATE = struct.Struct("<Q32sBiiiiB")
+STATE = struct.Struct("<Q32sBqqqqBqB")
 
 
 def check(value, message):
@@ -41,7 +41,7 @@ def plain(path):
 
 
 def acceptances(path):
-    return re.findall(r"^\[\d\d:\d\d:\d\d\.\d{3}\] ACCEPTED  ", plain(path), re.MULTILINE)
+    return re.findall(r"^\[\d\d:\d\d:\d\d\.\d{3}\] ACCEPTED reason=NORMAL  ", plain(path), re.MULTILINE)
 
 
 def frame(kind, request, payload):
@@ -135,7 +135,7 @@ class FakeGateway:
                                 if self.mode == "invalid":
                                     connection.sendall(frame(8, request, stamp + struct.pack("<H", 1)))
                                     continue
-                                connection.sendall(frame(2, request, stamp))
+                                connection.sendall(frame(2, request, stamp + struct.pack("<H",3)))
                                 if self.mode != "half_login":
                                     connection.sendall(frame(7, request, stamp + b"\x01" + bytes(STATE.size)))
                             elif kind == 3:
@@ -144,9 +144,9 @@ class FakeGateway:
                                     self.drop_order = False
                                     self.mode = "closed"
                                     break
-                                symbol, side, price, quantity = struct.unpack("<32sBii", payload)
-                                order = STATE.pack(self.orders, symbol, side, price, quantity, 0, quantity, 1)
-                                connection.sendall(frame(5, request, stamp + order))
+                                symbol, side, price, quantity, tif = struct.unpack("<32sBqqB", payload)
+                                order = STATE.pack(self.orders, symbol, side, price, quantity, 0, quantity, 1, 0, tif)
+                                connection.sendall(frame(5, request, stamp + order + b"\x00"))
                             else:
                                 raise AssertionError(f"Unexpected or replayed request: {kind}")
                     except (OSError, EOFError):

@@ -39,13 +39,13 @@ def shard_market(port):
         connection.sendall(b"\x01")
         length, = struct.unpack("<I", exact(connection, 4))
         data = exact(connection, length)
-    count, = struct.unpack_from("<H", data, 16)
-    offset, books = 18, {}
+    count, = struct.unpack_from("<H", data, 17)
+    offset, books = 19, {}
     for _ in range(count):
         symbol, levels = struct.unpack_from("<HB", data, offset)
         offset += 3
-        books[symbol] = [struct.unpack_from("<BiQQ", data, offset + i * 21) for i in range(levels)]
-        offset += levels * 21
+        books[symbol] = [struct.unpack_from("<BqQQ", data, offset + i * 25) for i in range(levels)]
+        offset += levels * 25
     check(offset == len(data), "market frame trailing bytes")
     return books
 
@@ -55,10 +55,10 @@ def publisher_market(port, symbol, metadata=False):
         connection.sendall(struct.pack("<H", symbol))
         length, = struct.unpack("<H", exact(connection, 2))
         data = exact(connection, length)
-    check(data[0] == 2 and struct.unpack_from("<H", data, 17)[0] == symbol, "publisher snapshot header")
+    check(data[0] == 3 and data[1] == 2 and struct.unpack_from("<H", data, 18)[0] == symbol, "publisher snapshot header")
     if metadata:
-        return bytes(data[1:17]), struct.unpack_from("<Q", data, 19)[0]
-    return [struct.unpack_from("<BiQQ", data, i) for i in range(35, len(data), 21)]
+        return bytes(data[2:18]), struct.unpack_from("<Q", data, 20)[0]
+    return [struct.unpack_from("<BqQQ", data, i) for i in range(36, len(data), 25)]
 
 
 def command(port, text):
@@ -80,7 +80,7 @@ class Deployment:
         self.topology = {"router_admin_port": self.admin, "supervisor_port": self.control, "shards": {}}
         lines = ["routing=router", f"gateway_listen=127.0.0.1,{self.gateway}",
                  f"router_listen=127.0.0.1,{self.router}", f"engine_endpoint=127.0.0.1,{self.router}"]
-        lines += [f"user={user},demo" for user in ("Alice", "Bob", "Carol", "Load")]
+        lines += [f"user={user},demo" for user in ("Alice", "Bob", "Carol", "Load", "LoadMaker")]
         sources = []
         for shard in range(1, 5):
             config = {"market": next(ports)}
@@ -149,10 +149,12 @@ class Deployment:
 
 
 class Load:
-    """Bounded pipelined self-trades on separate symbols; verify every response."""
+    """Bounded pipelined cross-account trades on separate symbols; verify every response."""
     def __init__(self, port, rate):
         self.trader = Trader(port, "Load")
+        self.maker = Trader(port, "LoadMaker")
         self.trader.sock.settimeout(35)
+        self.maker.sock.settimeout(35)
         self.rate = rate
         self.stop = threading.Event()
         self.finished = threading.Event()
@@ -184,9 +186,10 @@ class Load:
                         time.sleep(0.001)
                     shard, side = index // 2 + 1, index % 2 + 1
                     with self.lock:
-                        request = self.trader.request
-                        self.pending[request] = time.monotonic()
-                        self.trader.send(3, struct.pack("<32sBii", fixed(f"LOAD{shard}"), side, 100, 1))
+                        trader = self.trader if side == 1 else self.maker
+                        request = trader.request
+                        self.pending[(side, request)] = time.monotonic()
+                        trader.send(3, struct.pack("<32sBqq", fixed(f"LOAD{shard}"), side, 100, 1))
                         self.sent += 1
                     expected = self.sent / self.rate
                     delay = expected - (time.monotonic() - self.started)
@@ -204,13 +207,16 @@ class Load:
                     done = self.finished.is_set() and not self.pending and sum(self.trades.values()) == self.sent
                 if done:
                     return
-                if not select.select([self.trader.sock], [], [], .1)[0]:
+                ready = select.select([self.trader.sock, self.maker.sock], [], [], .1)[0]
+                if not ready:
                     continue
-                kind, request, payload = self.trader.receive()
+                side = 1 if ready[0] is self.trader.sock else 2
+                trader = self.trader if side == 1 else self.maker
+                kind, request, payload = trader.receive()
                 if kind == 5 and request:
                     with self.lock:
-                        check(request in self.pending, "duplicate/unknown acceptance")
-                        self.latencies.append((time.monotonic() - self.pending.pop(request)) * 1000)
+                        check((side, request) in self.pending, "duplicate/unknown acceptance")
+                        self.latencies.append((time.monotonic() - self.pending.pop((side, request))) * 1000)
                         self.accepted += 1
                 elif kind == 6:
                     trade_id = struct.unpack_from("<Q", payload, 8)[0]
@@ -226,6 +232,7 @@ class Load:
         self.writer.join(timeout=40)
         self.reader.join(timeout=40)
         self.trader.close()
+        self.maker.close()
         check(not self.writer.is_alive() and not self.reader.is_alive(), "load threads timed out")
         check(not self.errors, f"load errors: {self.errors}")
         check(self.sent == self.accepted, "missing accepted orders")
@@ -296,7 +303,7 @@ def exercise(binaries, root, resting, rate, copy_rate, warmup, switch_gap):
         # Populate a nontrivial file on every shard using bounded batches.
         extra = []
         for start in range(0, resting, 128):
-            requests = [bob.send(3, struct.pack("<32sBii", fixed(f"ITEM{i % 4 + 1}"), 2, 110, 1))
+            requests = [bob.send(3, struct.pack("<32sBqq", fixed(f"ITEM{i % 4 + 1}"), 2, 110, 1))
                         for i in range(start, min(resting, start + 128))]
             responses = set()
             for _ in requests:
@@ -353,7 +360,7 @@ def exercise(binaries, root, resting, rate, copy_rate, warmup, switch_gap):
         for order_id in extra[:8]:
             request = bob.send(4, struct.pack("<Q", order_id))
             kind, response, payload = bob.receive()
-            check(kind == 5 and response == request and payload[-1] == 4, "cancel after restart")
+            check(kind == 5 and response == request and payload[81] == 4, "cancel after restart")
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if all((2, 100, 4, 1) in publisher_market(ex.query, shard) for shard in range(1, 5)):
@@ -367,7 +374,7 @@ def exercise(binaries, root, resting, rate, copy_rate, warmup, switch_gap):
               "planned cut reset publisher epoch or stalled its sequence")
         ex.udp.settimeout(2)
         packet = ex.udp.recv(65536)
-        check(len(packet) >= 35 and packet[0] in (1, 2), "publisher UDP delivery failed")
+        check(len(packet) >= 36 and packet[0] == 3 and packet[1] in (1, 2), "publisher UDP delivery failed")
         alice.close()
         bob.close()
         snapshot = Trader(ex.gateway)
@@ -380,14 +387,14 @@ def exercise(binaries, root, resting, rate, copy_rate, warmup, switch_gap):
             check(kind == 7 and response == request, "snapshot stream correlation")
             if payload[8]:
                 break
-            order = struct.unpack_from("<Q32sBiiiiB", payload, 9)
+            order = struct.unpack_from("<Q32sBqqqqBqB", payload, 9)
             check(order[0] not in active, "duplicate snapshot order")
             active[order[0]] = order[6]
         expected_active = {order_id: 1 for order_id in extra[8:]}
         expected_active.update({orders[2]: 4 for orders in fifo.values()})
         check(active == expected_active, "login snapshot lost order state across handoffs")
         snapshot.close()
-        # Trade API still exposes every self-trade exactly once in history.
+        # Trade API still exposes every cross-account trade exactly once in history.
         trader = Trader(ex.gateway, "Load")
         check(len(trader.history()) == load_result["trades"], "replicated trade history lost/duplicated records")
         trader.close()
@@ -431,6 +438,7 @@ def exercise(binaries, root, resting, rate, copy_rate, warmup, switch_gap):
         if load:
             load.stop.set()
             load.trader.close()
+            load.maker.close()
         ex.close()
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real TCP/API/CLI and SIGKILL tests. Creates an isolated deployment per run."""
 import argparse
+from decimal import Decimal
 import json
 import os
 import re
@@ -14,7 +15,7 @@ import tempfile
 import time
 
 HEADER = struct.Struct("<HIQ")
-HISTORY = struct.Struct("<QQ32siiQQ32s32s")
+HISTORY = struct.Struct("<QQ32sqqQQ32s32s")
 END = struct.Struct("<QHHIQQ")
 
 
@@ -45,6 +46,8 @@ class Trader:
         self.sock.close()
 
     def send(self, kind, payload):
+        if kind == 1: payload += struct.pack("<H", 3)
+        if kind == 3 and len(payload) == 49: payload += b"\x00"  # default GTC
         req = self.request
         self.request += 1
         self.sock.sendall(HEADER.pack(kind, HEADER.size + len(payload), req) + payload)
@@ -61,11 +64,11 @@ class Trader:
 
     def receive(self):
         kind, length, request = HEADER.unpack(self.exact(HEADER.size))
-        check(HEADER.size <= length <= 150, "wire length")
+        check(HEADER.size <= length <= 158, "wire length")
         return kind, request, self.exact(length - HEADER.size)
 
     def order(self, symbol, side, quantity=1):
-        req = self.send(3, struct.pack("<32sBii", fixed(symbol), side, 100, quantity))
+        req = self.send(3, struct.pack("<32sBqq", fixed(symbol), side, 100, quantity))
         kind, response, payload = self.receive()
         check(kind == 5 and response == req, "order acceptance")
         return struct.unpack_from("<Q", payload, 8)[0]
@@ -75,7 +78,7 @@ class Trader:
         for _ in range(count):
             kind, req, payload = self.receive()
             check(kind == 6 and req == 0, "live trade notification")
-            values.append(struct.unpack("<QQQ32sBii", payload))
+            values.append(struct.unpack("<QQQ32sBqq", payload))
             kind, req, _ = self.receive()
             check(kind == 5 and req == 0, "live filled order update")
         return values
@@ -281,7 +284,7 @@ def exercise(binaries, root, routing):
         (root / "client.log").write_text(cli.stdout)
         check(cli.returncode == 0, "client process failed")
         plain = re.sub(r"\x1b\[[0-9;]*m", "", cli.stdout)
-        rows = re.findall(r"^TRADE\s+(\d+)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})\s+(BUY|SELL|SELF)\s+(\S+)\s+(\d+)\s+(\d+)\s+(\d+)$", plain, re.MULTILINE)
+        rows = re.findall(r"^TRADE\s+(\d+)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})\s+(BUY|SELL|SELF)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)$", plain, re.MULTILINE)
         check(len(rows) == len(expected), "client did not print every trade clearly")
         check([int(row[0]) for row in rows] == list(range(1, len(expected) + 1)), "history row numbering skipped or repeated")
         records = {record[1]: record for record in expected}
@@ -291,7 +294,7 @@ def exercise(binaries, root, routing):
             buyer, seller = record[7].rstrip(b"\0"), record[8].rstrip(b"\0")
             expected_side = "SELF" if buyer == seller == b"Alice" else "BUY" if buyer == b"Alice" else "SELL"
             expected_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record[0] // 1_000_000_000)) + f".{record[0] // 1_000_000 % 1000:03d}"
-            check((stamp, side, symbol, int(quantity), int(price)) == (expected_time, expected_side, record[2].rstrip(b"\0").decode(), record[4], record[3]), "history row fields differ from API")
+            check((stamp, side, symbol, int(Decimal(quantity)*100000000), int(Decimal(price)*100000000)) == (expected_time, expected_side, record[2].rstrip(b"\0").decode(), record[4], record[3]), "history row fields differ from API")
         check(f"COMPLETE  {len(expected)} trades" in plain, "client did not finish automatic pagination")
         check(not any(token in plain for token in ("shard", "Offset", "HISTORY_PAGE", "requestId=", "sentAtNs=", "committed")), "history display leaked internal bookkeeping")
         check("\x1b[1;35mTRADE\x1b[0m" in cli.stdout, "trade keyword is not purple")
