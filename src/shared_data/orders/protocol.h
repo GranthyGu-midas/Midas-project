@@ -18,8 +18,10 @@ static_assert(std::endian::native == std::endian::little);
 using SymbolName = char[32];
 using Username = char[32];
 using Password = char[32];
-using Price = std::int32_t;
-using Quantity = std::int32_t;
+// Signed 64-bit fixed point: actual value = wire value / 100000000.
+inline constexpr std::uint16_t protocol_version = 3;
+using Price = std::int64_t;
+using Quantity = std::int64_t;
 using OrderId = std::uint64_t;
 using RequestId = std::uint64_t;
 using TradeId = std::uint64_t;
@@ -37,6 +39,9 @@ enum class MessageType : std::uint16_t {
   TradeHistoryRequest = 9,
   TradeHistoryRecord = 10,
   TradeHistoryEnd = 11,
+  ReduceRequest = 12,
+  InstrumentRequest = 13,
+  InstrumentInfo = 14,
 };
 
 enum class Side : std::uint8_t {
@@ -44,11 +49,15 @@ enum class Side : std::uint8_t {
   Sell = 2
 };
 
+enum class TimeInForce : std::uint8_t { GTC = 0, IOC = 1 };
+enum class UpdateReason : std::uint8_t { Normal = 0, Reduced = 1, UserCancel = 2, IOC = 3, SelfTradePrevention = 4 };
+
 enum class OrderStatus : std::uint8_t {
   Accepted = 1,
   PartiallyFilled = 2,
   Filled = 3,
   Canceled = 4,
+  Expired = 5,
 };
 
 enum class RejectReason : std::uint16_t {
@@ -58,6 +67,8 @@ enum class RejectReason : std::uint16_t {
   InvalidHistoryQuery = 4,
   HistoryUnavailable = 5,
   HistoryBusy = 6,
+  ReduceFailed = 7,
+  UnknownInstrument = 8,
 };
 
 #pragma pack(push, 1)
@@ -78,17 +89,21 @@ struct OrderState {
   Quantity filledQuantity;
   Quantity remainingQuantity;
   OrderStatus status;
+  Quantity canceledQuantity;
+  TimeInForce timeInForce;
 };
 
 struct LoginRequest {
   Header header;
   Username username;
   Password password;
+  std::uint16_t version = protocol_version;
 };
 
 struct LoginAccepted {
   Header header;
   Timestamp timestamp;
+  std::uint16_t version = protocol_version;
 };
 
 struct NewOrderRequest {
@@ -97,6 +112,7 @@ struct NewOrderRequest {
   Side side;
   Price price;
   Quantity quantity;
+  TimeInForce timeInForce = TimeInForce::GTC;
 };
 
 struct CancelRequest {
@@ -104,10 +120,31 @@ struct CancelRequest {
   OrderId orderId;
 };
 
+// New total includes cumulative fills. Only reductions are permitted.
+struct ReduceRequest {
+  Header header;
+  OrderId orderId;
+  Quantity newTotalQuantity;
+};
+
+struct InstrumentRequest {
+  Header header;
+  SymbolName symbol;
+};
+
+struct InstrumentInfo {
+  Header header;
+  Timestamp timestamp;
+  SymbolName symbol;
+  Price priceTick;
+  Quantity quantityStep;
+};
+
 struct OrderUpdate {
   Header header;
   Timestamp timestamp;
   OrderState order;
+  UpdateReason reason = UpdateReason::Normal;
 };
 
 struct Trade {
@@ -173,21 +210,34 @@ struct TradeHistoryEnd {
 
 #pragma pack(pop)
 
+inline bool valid_active_order(const OrderState& s) {
+  return s.orderId && s.price > 0 && s.originalQuantity > 0 && s.filledQuantity >= 0 &&
+      s.canceledQuantity >= 0 && s.remainingQuantity > 0 &&
+      s.filledQuantity <= s.originalQuantity &&
+      s.canceledQuantity <= s.originalQuantity - s.filledQuantity &&
+      s.remainingQuantity == s.originalQuantity - s.filledQuantity - s.canceledQuantity &&
+      (s.side == Side::Buy || s.side == Side::Sell) && s.timeInForce == TimeInForce::GTC &&
+      s.status == (s.filledQuantity ? OrderStatus::PartiallyFilled : OrderStatus::Accepted);
+}
+
 static_assert(sizeof(Header) == 14);
 static_assert(offsetof(Header, messageType) == 0);
 static_assert(offsetof(Header, messageLength) == 2);
 static_assert(offsetof(Header, requestId) == 6);
-static_assert(sizeof(OrderState) == 58);
-static_assert(sizeof(LoginRequest) == 78);
-static_assert(sizeof(LoginAccepted) == 22);
-static_assert(sizeof(NewOrderRequest) == 55);
+static_assert(sizeof(OrderState) == 83);
+static_assert(sizeof(LoginRequest) == 80);
+static_assert(sizeof(LoginAccepted) == 24);
+static_assert(sizeof(NewOrderRequest) == 64);
 static_assert(sizeof(CancelRequest) == 22);
-static_assert(sizeof(OrderUpdate) == 80);
-static_assert(sizeof(Trade) == 79);
-static_assert(sizeof(ActiveOrderSnapshot) == 81);
+static_assert(sizeof(ReduceRequest) == 30);
+static_assert(sizeof(InstrumentRequest) == 46);
+static_assert(sizeof(InstrumentInfo) == 70);
+static_assert(sizeof(OrderUpdate) == 106);
+static_assert(sizeof(Trade) == 87);
+static_assert(sizeof(ActiveOrderSnapshot) == 106);
 static_assert(sizeof(RequestRejected) == 24);
 static_assert(sizeof(TradeHistoryRequest) == 34);
-static_assert(sizeof(TradeHistoryRecord) == 150);
+static_assert(sizeof(TradeHistoryRecord) == 158);
 static_assert(sizeof(TradeHistoryEnd) == 46);
 
 template <typename T>
@@ -197,6 +247,8 @@ inline constexpr bool is_wire_record =
 static_assert(is_wire_record<Header> && is_wire_record<OrderState> &&
               is_wire_record<LoginRequest> && is_wire_record<LoginAccepted> &&
               is_wire_record<NewOrderRequest> && is_wire_record<CancelRequest> &&
+              is_wire_record<ReduceRequest> && is_wire_record<InstrumentRequest> &&
+              is_wire_record<InstrumentInfo> &&
               is_wire_record<OrderUpdate> && is_wire_record<Trade> &&
               is_wire_record<ActiveOrderSnapshot> && is_wire_record<RequestRejected> &&
               is_wire_record<TradeHistoryRequest> && is_wire_record<TradeHistoryRecord> &&

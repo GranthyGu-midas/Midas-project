@@ -30,6 +30,9 @@ std::size_t message_size(MessageType type) {
       return sizeof(NewOrderRequest);
     case MessageType::CancelRequest:
       return sizeof(CancelRequest);
+    case MessageType::ReduceRequest: return sizeof(ReduceRequest);
+    case MessageType::InstrumentRequest: return sizeof(InstrumentRequest);
+    case MessageType::InstrumentInfo: return sizeof(InstrumentInfo);
     case MessageType::OrderUpdate:
       return sizeof(OrderUpdate);
     case MessageType::Trade:
@@ -74,6 +77,8 @@ bool valid_client_record(std::span<const std::uint8_t> bytes, bool request) {
   const bool is_request = h.messageType == MessageType::LoginRequest ||
                           h.messageType == MessageType::NewOrderRequest ||
                           h.messageType == MessageType::CancelRequest ||
+                          h.messageType == MessageType::ReduceRequest ||
+                          h.messageType == MessageType::InstrumentRequest ||
                           h.messageType == MessageType::TradeHistoryRequest;
   return is_request == request && (!request || h.requestId != 0);
 }
@@ -108,6 +113,10 @@ bool valid_link_record(std::span<const std::uint8_t> bytes) {
       return h.user && h.token && h.session && payload.size() == sizeof(CancelRequest) &&
              valid_client_record(payload, true) &&
              copy_record<CancelRequest>(payload).header.messageType == MessageType::CancelRequest;
+    case LinkKind::Reduce:
+      return h.user && h.token && h.session && payload.size() == sizeof(ReduceRequest) &&
+             valid_client_record(payload, true) &&
+             copy_record<ReduceRequest>(payload).header.messageType == MessageType::ReduceRequest;
     case LinkKind::Snapshot:
       return h.user && h.token && h.session && payload.size() == sizeof(Header) &&
              copy_record<Header>(payload).messageType == MessageType::ActiveOrderSnapshot &&

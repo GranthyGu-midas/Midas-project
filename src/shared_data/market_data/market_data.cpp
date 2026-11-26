@@ -1,5 +1,6 @@
 #include "shared_data/market_data/market_data.hpp"
 #include "shared_data/console.hpp"
+#include "shared_data/orders/decimal.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -21,7 +22,7 @@ bool ordered(const Level& a, const Level& b) {
 void append_levels(Bytes& out, const std::vector<Level>& levels) {
   for (const auto& x : levels) {
     append_uint(out, static_cast<std::uint8_t>(x.side), 1);
-    append_uint(out, static_cast<std::uint32_t>(x.price), 4);
+    append_uint(out, static_cast<std::uint64_t>(x.price), 8);
     append_uint(out, x.quantity, 8);
     append_uint(out, x.num_orders, 8);
   }
@@ -36,12 +37,12 @@ std::vector<Level> read_levels(std::span<const std::uint8_t> data,
   out.reserve(n);
   for (std::size_t i = 0; i < n; ++i) {
     const auto side = static_cast<Side>(read_uint(data, offset, 1));
-    const auto price = read_uint(data, offset, 4);
-    if (price > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()))
-      throw std::runtime_error("Price exceeds int32");
+    const auto price = read_uint(data, offset, 8);
+    if (price > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+      throw std::runtime_error("Price exceeds int64");
     const auto quantity = read_uint(data, offset, 8);
     const auto orders = read_uint(data, offset, 8);
-    out.push_back({side, static_cast<std::int32_t>(price), quantity, orders});
+    out.push_back({side, static_cast<std::int64_t>(price), quantity, orders});
   }
   return out;
 }
@@ -143,6 +144,7 @@ Bytes encode(const Message& m) {
   validate_levels(m.levels, m.kind == Kind::Delta);
   Bytes out;
   out.reserve(header_size + m.levels.size() * level_size);
+  append_uint(out, wire_version, 1);
   append_uint(out, static_cast<std::uint8_t>(m.kind), 1);
   out.insert(out.end(), m.epoch.begin(), m.epoch.end());
   append_uint(out, m.symbol_id, 2);
@@ -156,6 +158,7 @@ Message decode(std::span<const std::uint8_t> data) {
   if (data.size() < header_size || (data.size() - header_size) % level_size)
     throw std::runtime_error("Invalid message length");
   std::size_t offset = 0;
+  if (read_uint(data, offset, 1) != wire_version) throw std::runtime_error("Unsupported market data version");
   Message m{};
   m.kind = static_cast<Kind>(read_uint(data, offset, 1));
   m.epoch = read_epoch(data, offset);
@@ -171,7 +174,8 @@ Message decode(std::span<const std::uint8_t> data) {
 Bytes encode_shard(const ShardView& view) {
   if (view.books.size() > 65535)
     throw std::runtime_error("Too many symbols");
-  Bytes out(view.epoch.begin(), view.epoch.end());
+  Bytes out{wire_version};
+  out.insert(out.end(), view.epoch.begin(), view.epoch.end());
   append_uint(out, view.books.size(), 2);
   for (const auto& [id, book] : view.books) {
     validate_book(book);
@@ -187,6 +191,7 @@ Bytes encode_shard(const ShardView& view) {
 ShardView decode_shard(std::span<const std::uint8_t> data,
                        const std::vector<std::uint16_t>& expected) {
   std::size_t offset = 0;
+  if (read_uint(data, offset, 1) != wire_version) throw std::runtime_error("Unsupported shard data version");
   ShardView view{read_epoch(data, offset), {}};
   const auto count = read_uint(data, offset, 2);
   if (count != expected.size())
@@ -207,7 +212,7 @@ ShardView decode_shard(std::span<const std::uint8_t> data,
 }
 
 std::size_t max_shard_size(std::size_t symbols) {
-  return 18 + symbols * (3 + 2 * depth * level_size);
+  return 19 + symbols * (3 + 2 * depth * level_size);
 }
 
 Epoch new_epoch() {
@@ -240,7 +245,7 @@ void print_message(const Message& m) {
     std::cout << "  "
               << console::Label{x.side == Side::Buy ? "BUY " : "SELL",
                                 x.side == Side::Buy ? console::green : console::yellow}
-              << " price=" << x.price << " quantity=" << x.quantity
+              << " price=" << format_decimal(x.price) << " quantity=" << format_decimal(x.quantity)
               << " numOfOrders=" << x.num_orders << '\n';
   std::cout << std::flush;
 }

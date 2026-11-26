@@ -1,3 +1,4 @@
+#include "shared_data/orders/decimal.hpp"
 #include "shared_data/runtime/io.hpp"
 #include "client/market_data.hpp"
 #include "client/recovery.hpp"
@@ -171,7 +172,7 @@ void print_view(std::string_view event, std::uint16_t id, const MarketView& view
       std::cout << "  "
                 << console::Label{level.side == Side::Buy ? "BUY " : "SELL",
                                   level.side == Side::Buy ? console::green : console::yellow}
-                << " price=" << level.price << " quantity=" << level.quantity
+                << " price=" << format_decimal(level.price) << " quantity=" << format_decimal(level.quantity)
                 << " numOfOrders=" << level.num_orders << '\n';
   }
   std::cout << std::flush;
@@ -298,8 +299,8 @@ void observe_market(const Config& config, std::size_t count, const std::atomic_b
         } catch (const std::exception&) {
           console.unavailable();
           std::optional<std::uint16_t> symbol;
-          if (size >= 19)
-            symbol = static_cast<std::uint16_t>(bytes[17] | (std::uint16_t(bytes[18]) << 8));
+          if (size >= 20 && bytes[0] == wire_version)
+            symbol = static_cast<std::uint16_t>(bytes[18] | (std::uint16_t(bytes[19]) << 8));
           recovery.invalid(symbol, runtime::Clock::now());
         }
       }

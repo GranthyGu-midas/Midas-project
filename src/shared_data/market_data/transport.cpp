@@ -18,7 +18,7 @@
 namespace marketlab::md {
 namespace {
 constexpr std::size_t shm_header_size = 16;
-constexpr std::array<std::uint8_t, 4> shm_magic{'M', 'D', 'S', '1'};
+constexpr std::array<std::uint8_t, 4> shm_magic{'M', 'D', 'S', '3'};
 
 std::runtime_error system_error(const std::string& what) {
   return std::runtime_error(what + ": " + std::strerror(errno));
@@ -72,7 +72,7 @@ class TcpSource final : public ShardSource {
       const auto prefix = runtime::receive_exact(socket_.get(), 4, deadline);
       std::size_t offset = 0;
       const auto n = read_uint(prefix, offset, 4);
-      if (n < 18 || n > max_shard_size(cfg_.symbols.size()))
+      if (n < 19 || n > max_shard_size(cfg_.symbols.size()))
         throw std::runtime_error("Invalid shard frame length");
       return decode_shard(runtime::receive_exact(socket_.get(), n, deadline), cfg_.symbols);
     } catch (...) {
@@ -132,7 +132,7 @@ class SharedSource final : public ShardSource {
     const auto now = unix_ns();
     if (!updated || updated > now || now - updated > std::uint64_t(max_age_) * 1'000'000)
       throw std::runtime_error("Shared view heartbeat is stale or clock moved backwards");
-    if (length < 18 || length > max_length - shm_header_size)
+    if (length < 19 || length > max_length - shm_header_size)
       throw std::runtime_error("Invalid shared-view length");
     return decode_shard(data.subspan(shm_header_size, length), cfg_.symbols);
   }

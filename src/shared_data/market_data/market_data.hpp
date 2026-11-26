@@ -10,9 +10,10 @@
 namespace marketlab::md {
 using Bytes = std::vector<std::uint8_t>;
 using Epoch = std::array<std::uint8_t, 16>;
+inline constexpr std::uint8_t wire_version = 3;
 inline constexpr std::size_t depth = 5;
-inline constexpr std::size_t header_size = 35;
-inline constexpr std::size_t level_size = 21;
+inline constexpr std::size_t header_size = 36;
+inline constexpr std::size_t level_size = 25;
 inline constexpr std::size_t max_snapshot_size = header_size + 2 * depth * level_size;
 inline constexpr std::size_t max_delta_size = header_size + 4 * depth * level_size;
 inline constexpr std::uint8_t shard_query = 1;
@@ -27,7 +28,7 @@ enum class Side : std::uint8_t {
 
 struct Level {
   Side side;
-  std::int32_t price;
+  std::int64_t price;
   std::uint64_t quantity;
   std::uint64_t num_orders;
   bool operator==(const Level&) const = default;
