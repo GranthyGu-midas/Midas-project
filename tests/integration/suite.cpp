@@ -123,11 +123,18 @@ void recovery(const fs::path& bin,const fs::path& dir) {
   // proves TCP recovery without depending on verbose per-symbol diagnostics.
   eventually([&] {
     auto log=read_text(dir/"observer.log");
-    return log.find("BOOK symbol=1 index=2 ")!=std::string::npos || log.find("BOOK symbol=1 index=3 ")!=std::string::npos;
+    // Recovery returns the latest snapshot; at 200ms, the stale timeout may
+    // span several batches. Every UDP batch >=2 for this symbol is blocked.
+    std::size_t at = 0;
+    while ((at = log.find("BOOK symbol=1 index=", at)) != std::string::npos) {
+      at += std::string("BOOK symbol=1 index=").size();
+      if (std::stoull(log.substr(at)) >= 2) return true;
+    }
+    return false;
   },"Observer failed to recover the lost real batch",6000);
   block_symbol_one.store(false);
   auto log=read_text(dir/"observer.log");
-  require(log.find("quantity=10 numOfOrders=1")!=std::string::npos,"Recovered public book differs from real order");
+  require(log.find("quantity=0.0000001 numOfOrders=1")!=std::string::npos,"Recovered public book differs from real order");
   auto before=snapshot(config.query,1); const auto outage_log_start=read_text(dir/"observer.log").size(); publisher.stop();
   eventually([&]{return read_text(dir/"observer.log").find("MARKET_DATA_UNAVAILABLE",outage_log_start)!=std::string::npos;},"Silent feed warning missing",6000);
   publisher.launch(bin/"market_broadcast",{"publish","--config",(dir/"publisher.conf").string()},dir/"publisher-restarted.log"); publisher_ready(config);

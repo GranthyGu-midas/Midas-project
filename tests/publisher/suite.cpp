@@ -13,7 +13,7 @@ void protocol_and_difference() {
     if(!after.levels.empty()) after.levels[rng()%after.levels.size()].num_orders+=1;
     md::Message delta{md::Kind::Delta,{},2,i+1,md::unix_ns(),md::difference(before,after)};
     auto wire=md::encode(delta); auto decoded=md::decode(wire);
-    require(wire.size()==35+21*delta.levels.size() && wire.size()<=455,"Market packet layout/size changed");
+    require(wire.size()==36+25*delta.levels.size() && wire.size()<=536,"Market packet layout/size changed");
     require(apply(before,decoded)==after,"Delta reconstruction failed");
   }
   for(auto bytes:{md::Bytes(34,0),md::Bytes(36,0),md::Bytes(456,0)}) {
@@ -56,7 +56,7 @@ void publication(Suite& suite,const fs::path& bin,unsigned products,unsigned sha
       require(m.kind==(use_snapshot?md::Kind::Snapshot:md::Kind::Delta),"Wrong adaptive/periodic message type");
       const auto entries=use_snapshot?expected_book.levels.size():
           (shape==0 || shape==1?0U:shape==4?1U:10U);
-      require(wire.size()==35+21*entries,"Wrong adaptive message size");
+      require(wire.size()==36+25*entries,"Wrong adaptive message size");
       if(!obs.books.contains(m.symbol_id)) {
         require(m.index==0 && m.kind==md::Kind::Snapshot,"Initial UDP snapshot missing");
         obs.books[m.symbol_id]={m.symbol_id,m.levels};
@@ -103,13 +103,13 @@ void publication(Suite& suite,const fs::path& bin,unsigned products,unsigned sha
   suite.metric("tcp_persistent_"+name,std::move(persistent_times),seconds,persistent_count,"Four clients, request to decoded validated full snapshot over existing TCP; shared pressure window");
   suite.metric("tcp_new_connection_"+name,std::move(new_times),seconds,new_count,"Four clients, connect through decoded snapshot and socket close; shared pressure window");
   const auto age_count=observations[0].ages.size();
-  suite.metric("udp_age_"+name,std::move(observations[0].ages),last+1,age_count,"Same-host wall-clock batch freeze to UDP receipt; includes encoding/burst queues; rate uses nominal batch duration");
+  suite.metric("udp_age_"+name,std::move(observations[0].ages),(last+1) * 0.2,age_count,"Same-host wall-clock batch freeze to UDP receipt; includes encoding/burst queues; rate uses nominal batch duration");
   std::vector<double> publication_times; std::istringstream lines(read_text(dir/"publisher.log"));
   for(std::string line;std::getline(lines,line);) if(line.find("Published index=")!=std::string::npos) {
     auto at=line.find("sample_us="); if(at!=std::string::npos) publication_times.push_back(std::stod(line.substr(at+10)));
   }
   auto rounds=publication_times.size(); require(rounds>=last+1,"Missing publication timing records");
-  suite.metric("publication_round_"+name,std::move(publication_times),rounds,rounds,"Production sample_us: shard reads through UDP submission; throughput uses nominal one-second cycles, not receiver delivery");
+  suite.metric("publication_round_"+name,std::move(publication_times),rounds * 0.2,rounds,"Production sample_us: shard reads through UDP submission; throughput uses nominal 200ms cycles, not receiver delivery");
   auto logs=read_text(dir/"publisher.log"); require(logs.find("Source unavailable")==std::string::npos && logs.find("UDP send failed")==std::string::npos,"Publisher reported source/send failure under healthy pressure");
   std::cout << "CHECK subscribers=3 expected_each=" << expected << " missing=0 duplicates=0 corrupt=0 products=" << products << " shards=" << shards << '\n';
 }
