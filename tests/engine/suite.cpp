@@ -40,18 +40,17 @@ struct Core {
 void validation() {
   Core c;
   for(auto r:{order_record(10,symbol(0),ml::Side::Buy,0,1),order_record(11,symbol(0),ml::Side::Buy,100,0),
-      order_record(12,"UNKNOWN",ml::Side::Buy,100,1),order_record(13,symbol(0),static_cast<ml::Side>(7),100,1),
-      order_record(14,symbol(1),ml::Side::Buy,89,1),order_record(15,symbol(1),ml::Side::Buy,112,1)}) {
+      order_record(12,"UNKNOWN",ml::Side::Buy,100,1),order_record(13,symbol(0),static_cast<ml::Side>(7),100,1)}) {
     auto events=c.call(1,od::LinkKind::NewOrder,r);
     require(events.size()==1,"Invalid order emitted extra events"); auto reject=od::copy_record<ml::RequestRejected>(events[0]);
     require(reject.reason==ml::RejectReason::InvalidOrder && reject.header.requestId==r.header.requestId,"Invalid order not rejected");
   }
   require(c.active(1).empty(),"Invalid order changed state");
-  for(int price:{90,111}) {
+  for(int price:{90,1000000}) {
     auto out=c.call(1,od::LinkKind::NewOrder,order_record(price,symbol(1),ml::Side::Buy,price,std::numeric_limits<int>::max()));
     auto accepted=od::copy_record<ml::OrderUpdate>(out.at(0)); require(accepted.order.remainingQuantity==std::numeric_limits<int>::max(),"int32 quantity lost");
   }
-  require(c.active(1).size()==2,"Inclusive price limit rejected");
+  require(c.active(1).size()==2,"Positive prices outside legacy band rejected");
   auto same=c.call(1,od::LinkKind::NewOrder,order_record(800,symbol(1),ml::Side::Buy,90,std::numeric_limits<int>::max()));
   (void)same; auto view=c.engine.market_view();
   require(view.books.at(2).levels.back().quantity==2ULL*std::numeric_limits<int>::max(),"Aggregate truncated to int32");
@@ -75,6 +74,9 @@ void oracle(unsigned scale) {
       } else require(od::copy_record<ml::RequestRejected>(out[0]).reason==ml::RejectReason::CancelFailed,"Unauthorized/inactive cancel accepted");
     } else {
       const unsigned p=rng()%16; const auto side=rng()%2?ml::Side::Buy:ml::Side::Sell;
+      // Independent normal-trade oracle uses distinct buyer/seller identities;
+      // dc self-crossing behavior has its own dedicated semantic suite.
+      user = (side == ml::Side::Buy ? 1U : 2U) + 2 * (rng() % 2);
       const int price=95+int(rng()%11),qty=1+rng()%20;
       ModelOrder incoming{(1ULL<<48)|next++,user,p,step,side,price,qty,0,qty}; std::vector<ExpectedFill> fills;
       while(incoming.remaining) {
@@ -156,16 +158,16 @@ void sweeps(Suite& suite,unsigned scale) {
   Core c; std::vector<double> times; const unsigned rounds=100*scale,depth=64; auto start=Clock::now();
   for(unsigned r=0;r<rounds;++r) {
     for(unsigned i=0;i<depth;++i) c.call(1,od::LinkKind::NewOrder,order_record(1,symbol(0),ml::Side::Sell,100,2));
-    auto tick=Clock::now(); auto out=c.call(1,od::LinkKind::NewOrder,order_record(2,symbol(0),ml::Side::Buy,110,2*depth)); times.push_back(us(tick));
-    require(out.size()==1+4*depth,"Self-trade sweep missing participant notifications");
+    auto tick=Clock::now(); auto out=c.call(2,od::LinkKind::NewOrder,order_record(2,symbol(0),ml::Side::Buy,110,2*depth)); times.push_back(us(tick));
+    require(out.size()==1+4*depth,"Cross-account sweep missing participant notifications");
     std::set<ml::TradeId> trades;
     for(unsigned i=0;i<depth;++i) {
       auto a=od::copy_record<ml::Trade>(out[1+4*i]),b=od::copy_record<ml::Trade>(out[3+4*i]);
-      require(a.tradeId==b.tradeId && a.orderId!=b.orderId && a.quantity==2 && a.price==100,"Self-trade sweep mismatch"); trades.insert(ml::TradeId(a.tradeId));
+      require(a.tradeId==b.tradeId && a.orderId!=b.orderId && a.quantity==2 && a.price==100,"Cross-account sweep mismatch"); trades.insert(ml::TradeId(a.tradeId));
     }
     require(trades.size()==depth && c.active(1).empty(),"Sweep duplicate trades/order leak");
   }
-  suite.metric("self_trade_sweep_64_orders",std::move(times),us(start)/1e6,rounds,"Latency times only the aggressive command (64 fills); throughput is completed sweeps including resting-order setup/checks");
+  suite.metric("cross_account_sweep_64_orders",std::move(times),us(start)/1e6,rounds,"Latency times only the aggressive command (64 fills); throughput is completed sweeps including resting-order setup/checks");
 }
 void concurrent(unsigned scale) {
   Core c(64); std::atomic_bool done{false}; std::atomic<unsigned> reads{0}; std::exception_ptr error; std::mutex mutex;
@@ -217,10 +219,10 @@ void pool_growth() {
 int main(int argc,char** argv) {
   try {
     require(argc==4,"Expected binary directory, result directory, scale"); Suite suite(argv[2]); unsigned scale=std::stoul(argv[3]);
-    suite.test("E01_validation_price_limits_and_uint64_aggregation",validation);
+    suite.test("E01_validation_positive_prices_and_uint64_aggregation",validation);
     suite.test("E02_seeded_independent_oracle_8000_commands",[&]{oracle(scale);});
     for(unsigned count:{16U,1000U,2000U}) suite.test("E03_new_cancel_pressure_"+std::to_string(count),[&]{pressure(suite,count,scale);});
-    suite.test("E04_self_trade_64_resting_orders_per_sweep",[&]{sweeps(suite,scale);});
+    suite.test("E04_cross_account_64_resting_orders_per_sweep",[&]{sweeps(suite,scale);});
     suite.test("E05_one_writer_four_concurrent_market_readers",[&]{concurrent(scale);});
     suite.test("E06_2000_live_orders_growth_middle_cancel_and_reuse",pool_growth);
     return suite.finish();

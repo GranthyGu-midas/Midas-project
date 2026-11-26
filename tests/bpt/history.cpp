@@ -86,14 +86,14 @@ void correctness(const std::filesystem::path& root) {
     compare(frozen,expected);
     expected = log_records(root); compare(all(e,1),expected);
     order(e,3,604,m::Side::Sell,1); order(e,3,605,m::Side::Buy,1); e.drain();
-    auto self = all(e,3); require(self.size() == 1 && o::fixed_string(self[0].buyer) == "Carol" && o::fixed_string(self[0].seller) == "Carol","self-trade duplicated");
+    auto self = all(e,3); require(self.empty(),"STP generated a trade history entry");
     require(query(e,1,0,e.boundary().trade_end+1).error == m::RejectReason::InvalidHistoryQuery,"future cursor accepted");
     require(query(e,1,0,0,257).error == m::RejectReason::InvalidHistoryQuery,"oversized query accepted");
     require(query(e,1,0,100).error == m::RejectReason::InvalidHistoryQuery,"partial-frame cursor accepted");
     compare(all(e,1),expected); // Invalid client cursors must not disable the index.
   }
   {
-    p::DurableEngine e(config(),1,opt); compare(all(e,1),expected); require(all(e,3).size()==1,"self-trade reopen");
+    p::DurableEngine e(config(),1,opt); compare(all(e,1),expected); require(all(e,3).empty(),"STP history after reopen");
   }
   // A bad derived checkpoint is discarded, while the trade file stays authoritative.
   auto snapshot = root/"history/index.snapshot";
