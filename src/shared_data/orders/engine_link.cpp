@@ -91,6 +91,20 @@ bool valid_link_record(std::span<const std::uint8_t> bytes) {
     return false;
   const auto payload = bytes.subspan(link_header_size);
   switch (h.kind) {
+    case LinkKind::Replay: {
+      if (!h.user || !h.session || payload.size() != sizeof(ReplayRequest))
+        return false;
+      const auto q = copy_record<ReplayRequest>(payload);
+      if (!q.shard || empty_dataset(q.dataset) || q.operation > ReplayOp::Barrier)
+        return false;
+      const bool control = q.operation == ReplayOp::Begin || q.operation == ReplayOp::Barrier;
+      return control ? h.token != 0 : h.token == 0 && q.input_seq != 0 && q.order_id != 0;
+    }
+    case LinkKind::ReplayReady:
+      return h.user && h.session && h.token && payload.size() == sizeof(ReplayReady);
+    case LinkKind::ReplayUnavailable:
+      return !h.user && !h.session && !h.token && payload.size() == sizeof(std::uint16_t) &&
+             copy_record<std::uint16_t>(payload) != 0;
     case LinkKind::Hello:
     case LinkKind::Ready:
       return payload.size() == link_version.size() &&
