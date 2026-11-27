@@ -137,5 +137,6 @@ struct Options {
 
 struct Boundary {
   std::uint64_t seq = 0, next_order = 1, next_trade = 1, trade_end = 0, trade_count = 0;
+  ReplayState replay{};
 };
 }  // namespace marketlab::orders::persistence

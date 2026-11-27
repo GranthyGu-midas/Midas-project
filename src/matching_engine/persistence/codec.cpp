@@ -141,6 +141,10 @@ void start_frame(
   integer(out, b.next_trade, 8);
   integer(out, trades, 4);
   integer(out, count, 4);
+  integer(out, b.replay.next_order, 8);
+  integer(out, b.replay.last_input, 8);
+  integer(out, b.replay.last_event_ns, 8);
+  out.insert(out.end(), b.replay.dataset.begin(), b.replay.dataset.end());
 }
 
 void finish_frame(Bytes& out) {
@@ -180,13 +184,22 @@ Frame decode_frame(std::span<const std::uint8_t> bytes) {
   f.boundary.next_trade = r.number(8);
   f.trades = r.number(4);
   f.count = r.number(4);
+  f.boundary.replay.next_order = r.number(8);
+  f.boundary.replay.last_input = r.number(8);
+  f.boundary.replay.last_event_ns = r.number(8);
+  for (auto& byte : f.boundary.replay.dataset)
+    byte = static_cast<std::uint8_t>(r.number(1));
   f.payload.assign(bytes.begin() + header_bytes, bytes.end() - trailer_bytes);
   r.position = bytes.size() - trailer_bytes;
   f.checksum = r.number(4);
   if (f.checksum != crc32c(bytes.first(bytes.size() - trailer_bytes)) || r.number(8) != frame_end)
     throw std::runtime_error("Persistence checksum/footer mismatch");
-  if (!f.boundary.next_order || !f.boundary.next_trade || f.boundary.next_order > (1ULL << 48) ||
-      f.boundary.next_trade > (1ULL << 48))
+  if (!f.boundary.next_order || !f.boundary.next_trade || f.boundary.next_order > replay_id_bit ||
+      f.boundary.next_trade > (1ULL << 48) || !f.boundary.replay.next_order ||
+      f.boundary.replay.next_order > replay_id_bit ||
+      (empty_dataset(f.boundary.replay.dataset) &&
+       (f.boundary.replay.last_input || f.boundary.replay.next_order != 1)) ||
+      bool(f.boundary.replay.last_input) != bool(f.boundary.replay.last_event_ns))
     throw std::runtime_error("Invalid persistence ID counters");
   return f;
 }

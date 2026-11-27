@@ -28,7 +28,7 @@ DurableEngine::DurableEngine(const OrderConfig& c, std::uint16_t shard, Options 
   initial_ = boundary_;
   executed_ = boundary_.seq;
   checkpoint_seq_ = recovered.checkpoint;
-  working_.restore(recovered.orders, boundary_.next_order, boundary_.next_trade);
+  working_.restore(recovered.orders, boundary_.next_order, boundary_.next_trade, boundary_.replay);
   for (const auto& order : recovered.orders) {
     committed_.apply({false, storage_.dictionary().compact(order)});
   }

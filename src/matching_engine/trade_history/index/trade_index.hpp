@@ -4,6 +4,7 @@
 #include <vector>
 #include "page_file.hpp"
 #include "storage/index/b_plus_tree.h"
+#include "matching_engine/persistence/codec.hpp"
 
 namespace marketlab::orders::bpt {
 struct UserComparator {
@@ -21,7 +22,8 @@ struct TradePosition {
   std::uint32_t checksum = 0;
 
   std::uint64_t Get() const {
-    return frame + 48 + static_cast<std::uint64_t>(ordinal) * 144;
+    return frame + persistence::header_bytes +
+           static_cast<std::uint64_t>(ordinal) * persistence::stored_trade_bytes;
   }
 
   bool operator==(const TradePosition&) const = default;
@@ -67,8 +69,9 @@ class TradeIndex {
       return result;
     result.reserve(limit);
     // Construct a synthetic value with exactly the desired byte offset.
-    auto it =
-        after >= 48 ? tree_->BeginAfter(user, TradePosition{after - 48, 0, 0}) : tree_->Begin(user);
+    auto it = after >= persistence::header_bytes
+                  ? tree_->BeginAfter(user, TradePosition{after - persistence::header_bytes, 0, 0})
+                  : tree_->Begin(user);
     while (!it.IsEnd() && (*it).first == user && result.size() < limit) {
       const auto position = (*it).second;
       if (position.Get() >= through)

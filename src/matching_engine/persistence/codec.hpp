@@ -2,9 +2,9 @@
 #include "matching_engine/persistence/model.hpp"
 
 namespace marketlab::orders::persistence {
-inline constexpr std::uint64_t frame_magic = 0x33474f4c424c4dULL;
-inline constexpr std::uint64_t frame_end = 0x33444e45424c4dULL;
-inline constexpr std::size_t header_bytes = 48, trailer_bytes = 12,
+inline constexpr std::uint64_t frame_magic = 0x34474f4c424c4dULL;
+inline constexpr std::uint64_t frame_end = 0x34444e45424c4dULL;
+inline constexpr std::size_t header_bytes = 104, trailer_bytes = 12,
                              maximum_payload = 64 * 1024 * 1024;
 inline constexpr std::size_t stored_order_bytes = 123, stored_trade_bytes = 144;
 enum class Kind : std::uint32_t {

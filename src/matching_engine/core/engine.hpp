@@ -16,9 +16,8 @@ class MatchingEngine final : public EngineBackend {
  public:
   MatchingEngine(const OrderConfig&, std::uint16_t shard);
   void execute(const LinkHeader&, std::span<const std::uint8_t>, persistence::Result&);
-  void restore(std::span<const persistence::StoredOrder>,
-               std::uint64_t next_order,
-               std::uint64_t next_trade);
+  void restore(std::span<const persistence::StoredOrder>, std::uint64_t next_order,
+               std::uint64_t next_trade, const ReplayState& replay = {});
   // Apply authoritative final state without matching again or emitting events.
   void replicate(std::span<const persistence::Change>,
                  const persistence::OrderDictionary&,
@@ -30,6 +29,12 @@ class MatchingEngine final : public EngineBackend {
 
   std::uint64_t next_trade() const {
     return next_trade_;
+  }
+  const ReplayState& replay_state() const {
+    return replay_;
+  }
+  std::uint64_t replay_rejections() const {
+    return replay_rejections_;
   }
 
   std::size_t active_order_count(std::uint32_t user) const;
@@ -68,6 +73,7 @@ class MatchingEngine final : public EngineBackend {
 
   struct Order {
     OrderState state{};
+    std::uint64_t arrival = 0;
     std::uint32_t user = 0;
     Book* book = nullptr;
     Levels::iterator position{};
@@ -95,6 +101,8 @@ class MatchingEngine final : public EngineBackend {
   void change(const Order&, bool erase);
   std::uint16_t shard_;
   std::uint64_t next_order_ = 1, next_trade_ = 1;
+  ReplayState replay_{};
+  std::uint64_t replay_rejections_ = 0;
   md::Epoch epoch_;
   std::pmr::unsynchronized_pool_resource price_memory_;
   std::vector<Book> books_;
@@ -108,7 +116,7 @@ class MatchingEngine final : public EngineBackend {
   void queue(LinkKind, const LinkHeader&, const T&);
   void update(const Order&, RequestId, const LinkHeader&, Timestamp = 0, UpdateReason = UpdateReason::Normal);
   void trade(const Order&, TradeId, Price, Quantity, Timestamp);
-  void new_order(const LinkHeader&, const NewOrderRequest&);
+  void new_order(const LinkHeader&, const NewOrderRequest&, OrderId supplied_id = 0);
   void cancel(const LinkHeader&, const CancelRequest&, UpdateReason = UpdateReason::UserCancel);
   void reduce(const LinkHeader&, const ReduceRequest&);
   void snapshot(const LinkHeader&, const Header&);

@@ -15,7 +15,7 @@ std::uint64_t fingerprint(const OrderConfig& c, std::uint16_t shard) {
     h ^= 255;
     h *= 1099511628211ULL;
   };
-  add("parallel-v3-fixed8-dc");
+  add("parallel-v4-fixed8-q-fifo");
   add(std::to_string(shard));
   for (const auto& u : c.accounts)
     add(u.name);
@@ -37,6 +37,10 @@ std::uint32_t chain(std::uint32_t prev, std::uint32_t next) {
 void check_id(std::uint64_t id, std::uint16_t shard, std::uint64_t next) {
   if ((id >> 48) != shard || !(id & ((1ULL << 48) - 1)) || (id & ((1ULL << 48) - 1)) >= next)
     throw std::runtime_error("Persisted ID outside shard/counter range");
+}
+void check_order(std::uint64_t id, std::uint16_t shard, const Boundary& b) {
+  if (!valid_order_id(id, shard, b.next_order, b.replay))
+    throw std::runtime_error("Persisted order ID outside native/replay range");
 }
 }  // namespace
 
@@ -140,7 +144,8 @@ Recovered Storage::read_snapshot(const std::filesystem::path& path) const {
     if (!f)
       throw std::runtime_error("Incomplete published checkpoint");
     if (f->boundary.seq != out.boundary.seq || f->boundary.next_order != out.boundary.next_order ||
-        f->boundary.next_trade != out.boundary.next_trade)
+        f->boundary.next_trade != out.boundary.next_trade ||
+        f->boundary.replay != out.boundary.replay)
       throw std::runtime_error("Inconsistent checkpoint frame");
     Reader r{f->payload};
     if (f->kind == Kind::SnapshotEnd) {
@@ -179,7 +184,7 @@ Recovered Storage::recover() {
     throw std::runtime_error("Checkpoint name mismatch");
   std::unordered_map<OrderId, StoredOrder> active;
   for (const auto& o : out.orders) {
-    check_id(o.state.orderId, shard_, out.boundary.next_order);
+    check_order(o.state.orderId, shard_, out.boundary);
     if (!active.emplace(OrderId(o.state.orderId), o).second)
       throw std::runtime_error("Duplicate checkpoint order");
   }
@@ -214,8 +219,8 @@ Recovered Storage::recover() {
     for (unsigned i = 0; i < f->count; ++i) {
       auto t = decode_trade(r);
       check_id(t.id, shard_, f->boundary.next_trade);
-      check_id(t.buy_order, shard_, f->boundary.next_order);
-      check_id(t.sell_order, shard_, f->boundary.next_order);
+      check_order(t.buy_order, shard_, f->boundary);
+      check_order(t.sell_order, shard_, f->boundary);
     }
     r.finish();
     previous = f->boundary.seq;
@@ -250,12 +255,13 @@ Recovered Storage::recover() {
         continue;
       }
       if (f->boundary.next_order < out.boundary.next_order ||
-          f->boundary.next_trade != out.boundary.next_trade + f->trades)
+          f->boundary.next_trade != out.boundary.next_trade + f->trades ||
+          !replay_progresses(out.boundary.replay, f->boundary.replay))
         throw std::runtime_error("Nonmonotonic committed ID counters");
       if (f->trades) {
         const auto& t = trade->second;
         if (t.count != f->trades || t.b.next_order != f->boundary.next_order ||
-            t.b.next_trade != f->boundary.next_trade)
+            t.b.next_trade != f->boundary.next_trade || t.b.replay != f->boundary.replay)
           throw std::runtime_error("Mismatched parallel log frames");
         out.boundary.trade_end = t.end;
         out.boundary.trade_count += t.count;
@@ -269,11 +275,13 @@ Recovered Storage::recover() {
         const auto kind = r.number(1);
         if (kind == 0) {
           const auto id = r.number(8);
-          check_id(id, shard_, f->boundary.next_order);
+          check_order(id, shard_, f->boundary);
           active.erase(id);
         } else if (kind == 1) {
           auto o = decode_order(r);
-          check_id(o.state.orderId, shard_, f->boundary.next_order);
+          check_order(o.state.orderId, shard_, f->boundary);
+          if (!o.arrival || o.arrival >= f->boundary.next_order)
+            throw std::runtime_error("Persisted FIFO sequence outside arrival counter");
           active[OrderId(o.state.orderId)] = o;
         } else {
           throw std::runtime_error("Invalid order delta kind");
@@ -283,6 +291,7 @@ Recovered Storage::recover() {
       out.boundary.seq = f->boundary.seq;
       out.boundary.next_order = f->boundary.next_order;
       out.boundary.next_trade = f->boundary.next_trade;
+      out.boundary.replay = f->boundary.replay;
       keep = at;
     }
     cleanup.emplace_back(path, keep);

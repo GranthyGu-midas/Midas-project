@@ -146,7 +146,7 @@ p::StoredOrder stored_order() {
   state.remainingQuantity = 10;
   state.status = m::OrderStatus::Accepted;
   std::copy_n("Bob", 3, result.username.begin());
-  result.arrival = state.orderId;
+  result.arrival = 1;
   return result;
 }
 
@@ -195,7 +195,7 @@ void compact_records_and_cow() {
 
   auto second = compact;
   ++second.id;
-  second.arrival = second.id;
+  second.arrival = 2;
   second.original = 2;
   second.filled = 0;
   second.remaining = 2;

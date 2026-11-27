@@ -132,13 +132,13 @@ void MatchingEngine::change(const Order& o, bool erase) {
     return;
   persistence::Change c;
   c.erase = erase;
-  c.order = persistence::compact_order(o.state, o.user, o.book->symbol_id, o.state.orderId);
+  c.order = persistence::compact_order(o.state, o.user, o.book->symbol_id, o.arrival);
   capture_->add(capture_->changes, c);
 }
 
 void MatchingEngine::restore(std::span<const persistence::StoredOrder> orders,
-                             std::uint64_t next_order,
-                             std::uint64_t next_trade) {
+                             std::uint64_t next_order, std::uint64_t next_trade,
+                             const ReplayState& replay) {
   if (next_order_ != 1 || next_trade_ != 1)
     throw std::logic_error("Restore into nonempty core");
   std::uint64_t previous = 0;
@@ -148,11 +148,12 @@ void MatchingEngine::restore(std::span<const persistence::StoredOrder> orders,
     const auto found = symbols_.find(symbol);
     const auto user = std::find(usernames_.begin() + 1, usernames_.end(), stored.username);
     if (found == symbols_.end() || user == usernames_.end() || stored.arrival <= previous ||
-        (id >> 48) != shard_ || (id & sequence_limit) >= next_order)
+        stored.arrival >= next_order || !valid_order_id(id, shard_, next_order, replay))
       throw std::runtime_error("Invalid recovered order identity/FIFO");
     previous = stored.arrival;
     Order o;
     o.state = stored.state;
+    o.arrival = stored.arrival;
     o.user = static_cast<std::uint32_t>(user - usernames_.begin());
     o.book = &books_[found->second];
     if (!valid_active_order(o.state) || o.state.price % o.book->price_tick ||
@@ -164,6 +165,7 @@ void MatchingEngine::restore(std::span<const persistence::StoredOrder> orders,
   }
   next_order_ = next_order;
   next_trade_ = next_trade;
+  replay_ = replay;
 }
 
 void MatchingEngine::replicate(std::span<const persistence::Change> changes,
@@ -189,7 +191,7 @@ void MatchingEngine::replicate(std::span<const persistence::Change> changes,
     if (existing) {
       if (existing->user != change.order.user || existing->state.price != stored.state.price ||
           existing->state.side != stored.state.side ||
-          existing->book->symbol_id != change.order.symbol)
+          existing->book->symbol_id != change.order.symbol || existing->arrival != stored.arrival)
         throw std::runtime_error("Replication changed resting order identity");
       auto& quantity = existing->position->second.quantity;
       quantity -= existing->state.remainingQuantity;
@@ -197,10 +199,13 @@ void MatchingEngine::replicate(std::span<const persistence::Change> changes,
       existing->state = stored.state;  // Preserve the price-time queue position.
     } else {
       const auto found = symbols_.find(std::string_view(stored.state.symbol));
-      if (found == symbols_.end() || (change.order.id >> 48) != shard_)
+      if (found == symbols_.end() ||
+          !valid_order_id(change.order.id, shard_, boundary.next_order, boundary.replay) ||
+          !stored.arrival || stored.arrival >= boundary.next_order)
         throw std::runtime_error("Replication order belongs to another shard");
       Order order;
       order.state = stored.state;
+      order.arrival = stored.arrival;
       order.user = change.order.user;
       order.book = &books_[found->second];
       rest(order);
@@ -208,6 +213,7 @@ void MatchingEngine::replicate(std::span<const persistence::Change> changes,
   }
   next_order_ = boundary.next_order;
   next_trade_ = boundary.next_trade;
+  replay_ = boundary.replay;
 }
 
 void MatchingEngine::update(const Order& order,
@@ -238,7 +244,8 @@ void MatchingEngine::trade(
   queue(LinkKind::Event, {0, LinkKind::Event, 0, order.user, 0}, record);
 }
 
-void MatchingEngine::new_order(const LinkHeader& h, const NewOrderRequest& request) {
+void MatchingEngine::new_order(const LinkHeader& h, const NewOrderRequest& request,
+                               OrderId supplied_id) {
   // Validate fixed-width strings without allocating a temporary std::string.
   const auto end = std::find(std::begin(request.symbol), std::end(request.symbol), '\0');
   if (end == std::end(request.symbol) || !std::all_of(end, std::end(request.symbol), [](char c) {
@@ -252,8 +259,7 @@ void MatchingEngine::new_order(const LinkHeader& h, const NewOrderRequest& reque
       request.price % books_[found->second].price_tick ||
       request.quantity % books_[found->second].quantity_step ||
       (request.timeInForce != TimeInForce::GTC && request.timeInForce != TimeInForce::IOC) ||
-      next_order_ > sequence_limit ||
-      next_trade_ > sequence_limit) {
+      next_order_ > order_ordinal_mask || next_trade_ > sequence_limit) {
     queue(LinkKind::Event, h, rejected(request.header.requestId, RejectReason::InvalidOrder));
     return;
   }
@@ -270,7 +276,10 @@ void MatchingEngine::new_order(const LinkHeader& h, const NewOrderRequest& reque
   Order incoming{};
   incoming.user = h.user;
   incoming.book = &book;
-  incoming.state.orderId = allocate(shard_, next_order_);
+  incoming.arrival = next_order_;
+  incoming.state.orderId =
+      supplied_id ? supplied_id : ((std::uint64_t(shard_) << 48) | next_order_);
+  ++next_order_;
   std::memcpy(incoming.state.symbol, book.symbol, sizeof(SymbolName));
   incoming.state.side = request.side;
   incoming.state.price = request.price;
