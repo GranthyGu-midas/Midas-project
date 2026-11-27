@@ -8,6 +8,7 @@
 #include <deque>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 
 namespace marketlab::orders {
 namespace {
@@ -43,7 +44,7 @@ class Router {
       if (backend.contains(id))
         return true;
       for (const auto& shard : shards)
-        if (!links.ready(shard.connection))
+        if (!links.ready(shard.connection) || shard.stage != "active")
           return false;
       return true;
     };
@@ -56,23 +57,21 @@ class Router {
           shard.stage = "flushing";
         }
       } else {
-        if (front && front != id)
-          io.close(front);
-        front = id;
+        fronts.emplace(id, Front{});
         for (const auto& shard : shards)
           if (shard.stage != "active")
-            links.send(front, LinkKind::MaintenanceBegin, {0, {}, shard.cut_token, 0, 0}, {});
+            links.send(id, LinkKind::MaintenanceBegin, {0, {}, shard.cut_token, 0, 0}, {});
       }
     };
     links.on_message = [&](auto id, const auto& h, auto bytes) {
       if (backend.contains(id))
         result(id, h, bytes);
-      else if (id == front)
-        command(h, bytes);
+      else if (fronts.contains(id))
+        command(id, h, bytes);
       else
         io.close(id);
     };
-    io.listen(c.router_listen, Framing::Internal, 4 + c.shards.size());
+    io.listen(c.router_listen, Framing::Internal, c.max_connections);
     if (admin_port) {
       admin = std::make_unique<cluster::RpcServer>(admin_port);
       io.watch_wakeup(admin->fd(), [&] {
@@ -106,18 +105,17 @@ class Router {
       if (now - tick >= std::chrono::milliseconds(50)) {
         links.tick();
         io.expire();
-        bool expired = false;
+        std::unordered_set<ConnectionId> expired;
         for (const auto& [token, p] : pending) {
           (void)token;
           const bool paused = std::any_of(shards.begin(), shards.end(), [](const auto& s) {
             return s.stage != "active";
           });
           if (!paused && now > p.deadline) {
-            expired = true;
-            break;
+            expired.insert(p.front);
           }
         }
-        if (expired && front)
+        for (auto front : expired)
           io.close(front);
         tick = now;
       }
@@ -144,6 +142,7 @@ class Router {
   struct Queued {
     LinkHeader header;
     Bytes bytes;
+    ConnectionId front = 0;
   };
 
   struct Shard {
@@ -173,13 +172,48 @@ class Router {
   TcpReactor io;
   EngineLinks links;
   std::unique_ptr<cluster::RpcServer> admin;
-  ConnectionId front = 0;
+  enum class Role { Unknown, Gateway, Replay };
+  struct Front {
+    Role role = Role::Unknown;
+    DatasetId dataset{};
+    std::uint64_t session = 0;
+    std::unordered_set<std::uint64_t> tokens;
+  };
+  std::unordered_map<ConnectionId, Front> fronts;
+  std::uint64_t next_token = random_token_seed();
   std::vector<Shard> shards;
   std::unordered_map<ConnectionId, std::size_t> backend;
   std::unordered_map<std::uint16_t, std::size_t> shard_index;
   std::unordered_map<std::string, std::size_t> products;
   std::unordered_map<std::uint64_t, Pending> pending;
   std::uint64_t commands = 0, events = 0, snapshot_ends = 0;
+
+  std::vector<ConnectionId> front_ids(bool gateways_only = false) const {
+    std::vector<ConnectionId> ids;
+    for (const auto& [id, state] : fronts)
+      if (!gateways_only || state.role == Role::Gateway)
+        ids.push_back(id);
+    return ids;
+  }
+  void notify_fronts(LinkKind kind, const LinkHeader& h) {
+    for (auto id : front_ids())
+      links.send(id, kind, h, {});
+  }
+  void deliver(const Pending& p, LinkKind kind, const LinkHeader& h,
+               std::span<const std::uint8_t> bytes) {
+    auto original = h;
+    original.token = p.context.token;
+    links.send(p.front, kind, original, bytes);
+    ++events;
+  }
+  void finish_pending(std::uint64_t token) {
+    const auto it = pending.find(token);
+    if (it == pending.end())
+      return;
+    if (auto f = fronts.find(it->second.front); f != fronts.end())
+      f->second.tokens.erase(it->second.context.token);
+    pending.erase(it);
+  }
 
   void start_market(const std::string& path) {
     if (path.empty())
@@ -273,8 +307,7 @@ class Router {
         shard.peak_queued = shard.peak_bytes = 0;
         shard.boundary.clear();
         const LinkHeader context{0, {}, shard.cut_token, 0, 0};
-        if (front)
-          links.send(front, LinkKind::MaintenanceBegin, context, {});
+        notify_fronts(LinkKind::MaintenanceBegin, context);
         if (!links.send(shard.connection, LinkKind::Drain, context, {}))
           throw std::runtime_error("Cannot send drain marker");
         std::cout << "ROUTER_CUT shard=" << id << " token=" << shard.cut_token << std::endl;
@@ -315,13 +348,14 @@ class Router {
     });
   }
 
-  bool dispatch(Shard& shard, const LinkHeader& h, std::span<const std::uint8_t> bytes) {
+  bool dispatch(Shard& shard, const LinkHeader& h, std::span<const std::uint8_t> bytes,
+                ConnectionId front) {
     if (shard.stage == "active")
       return links.send(shard.connection, h.kind, h, bytes);
     if (shard.queued.size() >= c.max_pending ||
         shard.queued_bytes + bytes.size() > c.max_buffer_bytes)
       return false;
-    shard.queued.push_back({h, Bytes(bytes.begin(), bytes.end())});
+    shard.queued.push_back({h, Bytes(bytes.begin(), bytes.end()), front});
     shard.queued_bytes += bytes.size();
     shard.peak_queued = std::max(shard.peak_queued, shard.queued.size());
     shard.peak_bytes = std::max(shard.peak_bytes, shard.queued_bytes);
@@ -345,46 +379,67 @@ class Router {
       (void)token;
       p.deadline = Clock::now() + std::chrono::milliseconds(c.request_timeout_ms);
     }
-    if (front)
-      links.send(front, LinkKind::MaintenanceEnd, {0, {}, shard.cut_token, 0, 0}, {});
+    notify_fronts(LinkKind::MaintenanceEnd, {0, {}, shard.cut_token, 0, 0});
     std::cout << "ROUTER_RESUMED port=" << shard.address.port << std::endl;
   }
 
   void closed(ConnectionId id) {
     links.lost(id);
-    if (id == front) {
-      front = 0;
-      pending.clear();
+    if (fronts.erase(id)) {
+      std::erase_if(pending, [&](const auto& item) {
+        return item.second.front == id;
+      });
       for (auto& shard : shards) {
-        shard.queued.clear();
-        shard.queued_bytes = 0;
+        std::erase_if(shard.queued, [&](const auto& item) {
+          if (item.front != id)
+            return false;
+          shard.queued_bytes -= item.bytes.size();
+          return true;
+        });
       }
     }
     const auto it = backend.find(id);
     if (it != backend.end()) {
+      const auto shard_id = c.shards[it->second].id;
       shards[it->second].connection = 0;
       backend.erase(it);
-      if (front)
-        io.close(front);
+      for (auto front : front_ids()) {
+        const auto source = fronts.find(front);
+        if (source == fronts.end())
+          continue;
+        if (source->second.role == Role::Replay) {
+          // Let the producer read the outage notice before it closes its link.
+          // Immediately closing here could discard a buffered control frame.
+          if (!links.send(front, LinkKind::ReplayUnavailable, {}, record_bytes(shard_id)))
+            io.close(front);
+        } else {
+          io.close(front);
+        }
+      }
     }
   }
 
-  void reject(const LinkHeader& h, RequestId request, RejectReason reason) {
+  void reject(ConnectionId front, const LinkHeader& h, RequestId request, RejectReason reason) {
     links.send(front, LinkKind::Event, h, record_bytes(rejected(request, reason)));
   }
 
-  void command(const LinkHeader& h, std::span<const std::uint8_t> bytes) {
+  void command(ConnectionId front, const LinkHeader& h, std::span<const std::uint8_t> bytes) {
+    if (h.kind == LinkKind::Replay) {
+      replay_command(front, h, bytes);
+      return;
+    }
     if (h.kind != LinkKind::NewOrder && h.kind != LinkKind::Cancel && h.kind != LinkKind::Reduce &&
         h.kind != LinkKind::Snapshot && h.kind != LinkKind::History) {
       io.close(front);
       return;
     }
-    if (h.user > c.accounts.size() || pending.contains(h.token) ||
-        pending.size() >= c.max_pending) {
+    if (h.user > c.accounts.size() || fronts.at(front).role == Role::Replay ||
+        fronts.at(front).tokens.contains(h.token) || pending.size() >= c.max_pending) {
       io.close(front);
       return;
     }
     Header wire{};
+    fronts.at(front).role = Role::Gateway;
     std::memcpy(&wire, bytes.data(), sizeof(wire));
     ++commands;
     std::size_t target = 0;
@@ -396,7 +451,7 @@ class Router {
         const std::uint16_t shard_id = q.shard;
         const auto shard = shard_index.find(shard_id);
         if (shard == shard_index.end()) {
-          reject(h, wire.requestId, RejectReason::InvalidHistoryQuery);
+          reject(front, h, wire.requestId, RejectReason::InvalidHistoryQuery);
           return;
         }
         target = shard->second;
@@ -406,7 +461,7 @@ class Router {
       const auto order = copy_record<NewOrderRequest>(bytes);
       const auto product = products.find(fixed_string(order.symbol));
       if (product == products.end()) {
-        reject(h, wire.requestId, RejectReason::InvalidOrder);
+        reject(front, h, wire.requestId, RejectReason::InvalidOrder);
         return;
       }
       target = product->second;
@@ -415,7 +470,9 @@ class Router {
                                                      : copy_record<ReduceRequest>(bytes).orderId;
       const auto shard = shard_index.find(static_cast<std::uint16_t>(order_id >> 48));
       if (shard == shard_index.end()) {
-        reject(h, wire.requestId, h.kind == LinkKind::Reduce ? RejectReason::ReduceFailed : RejectReason::CancelFailed);
+        reject(front, h, wire.requestId,
+               h.kind == LinkKind::Reduce ? RejectReason::ReduceFailed
+                                          : RejectReason::CancelFailed);
         return;
       }
       target = shard->second;
@@ -428,19 +485,99 @@ class Router {
               Clock::now() + std::chrono::milliseconds(c.request_timeout_ms)};
     if (fanout)
       p.completed.resize(shards.size(), false);
-    pending.emplace(h.token, std::move(p));
+    auto routed = h;
+    if (++next_token == 0)
+      throw std::runtime_error("Router token space exhausted");
+    routed.token = next_token;
+    fronts.at(front).tokens.insert(h.token);
+    pending.emplace(routed.token, std::move(p));
     if (fanout) {
       for (auto& shard : shards) {
-        if (!dispatch(shard, h, bytes)) {
+        if (!dispatch(shard, routed, bytes, front)) {
           io.close(front);
           return;
         }
       }
-    } else if (!dispatch(shards[target], h, bytes))
+    } else if (!dispatch(shards[target], routed, bytes, front))
+      io.close(front);
+  }
+
+  void replay_command(ConnectionId front, const LinkHeader& h,
+                      std::span<const std::uint8_t> bytes) {
+    const auto q = copy_record<ReplayRequest>(bytes);
+    const std::uint16_t shard_id = q.shard;
+    const auto shard = shard_index.find(shard_id);
+    auto& source = fronts.at(front);
+    if (h.user > c.accounts.size() || shard == shard_index.end() || source.role == Role::Gateway) {
+      io.close(front);
+      return;
+    }
+    if (source.role == Role::Unknown) {
+      if (q.operation != ReplayOp::Begin) {
+        io.close(front);
+        return;
+      }
+      for (const auto& [id, f] : fronts)
+        if (id != front && f.role == Role::Replay) {
+          io.close(front);
+          return;
+        }
+      source.role = Role::Replay;
+      source.dataset = q.dataset;
+      source.session = h.session;
+    }
+    if (source.dataset != q.dataset || source.session != h.session) {
+      io.close(front);
+      return;
+    }
+    auto routed = h;
+    if (q.operation == ReplayOp::Begin || q.operation == ReplayOp::Barrier) {
+      if (source.tokens.contains(h.token) || pending.size() >= c.max_pending) {
+        io.close(front);
+        return;
+      }
+      if (++next_token == 0)
+        throw std::runtime_error("Router token space exhausted");
+      routed.token = next_token;
+      source.tokens.insert(h.token);
+      pending.emplace(routed.token,
+                      Pending{h,
+                              q.input_seq,
+                              front,
+                              shard->second,
+                              {},
+                              Clock::now() + std::chrono::milliseconds(c.request_timeout_ms)});
+    } else {
+      const auto product = products.find(fixed_string(q.symbol));
+      if (product == products.end() || product->second != shard->second ||
+          (q.order_id >> 48) != q.shard || !(q.order_id & replay_id_bit)) {
+        io.close(front);
+        return;
+      }
+      // No per-order pending entry, response or Q-side receipt bookkeeping.
+    }
+    ++commands;
+    if (!dispatch(shards[shard->second], routed, bytes, front))
       io.close(front);
   }
 
   void result(ConnectionId id, const LinkHeader& h, std::span<const std::uint8_t> bytes) {
+    if (h.kind == LinkKind::ReplayReady) {
+      const auto it = pending.find(h.token);
+      if (it == pending.end())
+        return;
+      const auto& p = it->second;
+      const auto ready = copy_record<ReplayReady>(bytes);
+      if (p.context.kind != LinkKind::Replay || p.target != backend.at(id) ||
+          h.user != p.context.user || h.session != p.context.session ||
+          ready.shard != c.shards[p.target].id) {
+        io.close(id);
+        return;
+      }
+      deliver(p, h.kind, h, bytes);
+      finish_pending(h.token);
+      return;
+    }
     if (h.kind == LinkKind::Drained) {
       auto& shard = shards[backend.at(id)];
       if (shard.stage != "draining" || h.token != shard.cut_token) {
@@ -469,7 +606,7 @@ class Router {
         io.close(id);
         return;
       }
-      if (front) {
+      for (auto front : front_ids(true)) {
         links.send(front, h.kind, h, bytes);
         ++events;
       }
@@ -506,18 +643,15 @@ class Router {
             return;
         auto end = server_record<ActiveOrderSnapshot>(MessageType::ActiveOrderSnapshot, p.request);
         end.isEnd = 1;
-        const auto destination = p.front;
-        pending.erase(it);
-        links.send(destination, LinkKind::SnapshotEnd, h, record_bytes(end));
+        deliver(p, LinkKind::SnapshotEnd, h, record_bytes(end));
+        finish_pending(h.token);
         ++snapshot_ends;
-        ++events;
       } else {
         if (snapshot.isEnd) {
           io.close(id);
           return;
         }
-        links.send(p.front, h.kind, h, bytes);
-        ++events;
+        deliver(p, h.kind, h, bytes);
       }
     } else {
       if (backend.at(id) != p.target || h.kind != LinkKind::Event ||
@@ -526,10 +660,8 @@ class Router {
         io.close(id);
         return;
       }
-      const auto destination = p.front;
-      pending.erase(it);
-      links.send(destination, h.kind, h, bytes);
-      ++events;
+      deliver(p, h.kind, h, bytes);
+      finish_pending(h.token);
     }
   }
 
@@ -539,21 +671,18 @@ class Router {
                       std::span<const std::uint8_t> bytes,
                       Pending& p) {
     const auto index = backend.at(id);
-    const auto destination = p.front;
     const bool fanout = !p.completed.empty();
     if ((!fanout && index != p.target) || (fanout && p.completed[index])) {
       io.close(id);
       return;
     }
     if (wire.messageType == MessageType::RequestRejected && h.kind == LinkKind::Event) {
-      pending.erase(h.token);
-      links.send(destination, h.kind, h, bytes);
-      ++events;
+      deliver(p, h.kind, h, bytes);
+      finish_pending(h.token);
       return;
     }
     if (wire.messageType == MessageType::TradeHistoryRecord && h.kind == LinkKind::Event) {
-      links.send(destination, h.kind, h, bytes);
-      ++events;
+      deliver(p, h.kind, h, bytes);
       return;
     }
     if (wire.messageType != MessageType::TradeHistoryEnd || h.kind != LinkKind::HistoryEnd) {
@@ -574,13 +703,12 @@ class Router {
         return done;
       });
     }
+    const auto routing = p;
+    deliver(routing, h.kind, h, bytes);
     if (complete)
-      pending.erase(h.token);
-    links.send(destination, h.kind, h, bytes);
-    ++events;
+      finish_pending(h.token);
     if (complete && fanout) {
-      links.send(destination, LinkKind::HistoryEnd, h, record_bytes(marker));
-      ++events;
+      deliver(routing, LinkKind::HistoryEnd, h, record_bytes(marker));
     }
   }
 };
