@@ -1,5 +1,16 @@
 # Four freshly implemented presentation suites; no legacy test targets.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_executable(chronoflow_core_tests chronoflow/core.cpp)
+target_link_libraries(chronoflow_core_tests PRIVATE midas_chronoflow marketlab_matching_core)
+target_compile_options(chronoflow_core_tests PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME chronoflow_core
+  COMMAND chronoflow_core_tests "${CMAKE_BINARY_DIR}/chronoflow-core-results")
+set_tests_properties(chronoflow_core PROPERTIES TIMEOUT 60 LABELS "chronoflow;recovery;correctness")
+add_test(NAME chronoflow_process
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/chronoflow/process.py"
+    "$<TARGET_FILE_DIR:market_chronoflow>" "${CMAKE_BINARY_DIR}/chronoflow-process-results")
+set_tests_properties(chronoflow_process PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE
+  LABELS "chronoflow;router;recovery;integration")
 set(MARKETLAB_TEST_OUTPUT_DIR "${CMAKE_BINARY_DIR}" CACHE PATH
   "Root for test logs and persisted data; use a Linux filesystem for sustained I/O tests")
 foreach(component engine gateway publisher integration)
