@@ -74,6 +74,20 @@ void MatchingEngine::Pool::release(Order* order) noexcept {
 template <typename T>
 void MatchingEngine::queue(LinkKind kind, const LinkHeader& context, const T& record) {
   static_assert(sizeof(T) <= sizeof(Event::payload));
+  // Q is a one-way background producer. Keep its book/trade persistence, but
+  // never construct per-order delivery events (including later maker fills).
+  if constexpr (std::is_same_v<T, OrderUpdate>) {
+    if (record.order.orderId & replay_id_bit)
+      return;
+  } else if constexpr (std::is_same_v<T, Trade>) {
+    if (record.orderId & replay_id_bit)
+      return;
+  } else if constexpr (std::is_same_v<T, RequestRejected>) {
+    if (context.kind == LinkKind::Replay) {
+      ++replay_rejections_;
+      return;
+    }
+  }
   Event event{};
   event.kind = kind;
   event.context = context;
@@ -92,7 +106,9 @@ void MatchingEngine::command(const LinkHeader& h,
   outgoing_.clear();
   if (!h.user || h.user >= users_.size())
     throw std::runtime_error("Unknown engine user");
-  if (h.kind == LinkKind::NewOrder)
+  if (h.kind == LinkKind::Replay)
+    replay(h, copy_record<ReplayRequest>(bytes));
+  else if (h.kind == LinkKind::NewOrder)
     new_order(h, copy_record<NewOrderRequest>(bytes));
   else if (h.kind == LinkKind::Cancel)
     cancel(h, copy_record<CancelRequest>(bytes));
@@ -134,6 +150,77 @@ void MatchingEngine::change(const Order& o, bool erase) {
   c.erase = erase;
   c.order = persistence::compact_order(o.state, o.user, o.book->symbol_id, o.arrival);
   capture_->add(capture_->changes, c);
+}
+
+void MatchingEngine::replay(const LinkHeader& h, const ReplayRequest& q) {
+  if (q.shard != shard_ || empty_dataset(q.dataset))
+    throw std::runtime_error("Invalid replay shard/dataset");
+  if (q.operation == ReplayOp::Begin || q.operation == ReplayOp::Barrier) {
+    ReplayReady ready{};
+    ready.shard = shard_;
+    ready.operation = q.operation;
+    if (q.operation == ReplayOp::Begin && empty_dataset(replay_.dataset))
+      replay_.dataset = q.dataset;
+    if (q.dataset != replay_.dataset)
+      ready.status = 1;
+    else if (q.operation == ReplayOp::Barrier && q.input_seq != replay_.last_input)
+      ready.status = 2;
+    ready.dataset = replay_.dataset;
+    ready.input_seq = replay_.last_input;
+    ready.event_time_ns = replay_.last_event_ns;
+    queue(LinkKind::ReplayReady, h, ready);
+    return;
+  }
+  if (q.dataset != replay_.dataset || !q.input_seq || !q.event_time_ns ||
+      !(q.order_id & replay_id_bit) || (q.order_id >> 48) != shard_ ||
+      !(q.order_id & order_ordinal_mask) || (q.side != Side::Buy && q.side != Side::Sell))
+    throw std::runtime_error("Invalid replay input identity");
+  // Reconnects may overlap an already executed prefix. Dataset identity makes
+  // input_seq stable; no second order-ID map or per-event receipt is required.
+  if (q.input_seq <= replay_.last_input)
+    return;
+  const auto symbol = fixed_string(q.symbol);
+  const auto found = symbols_.find(symbol);
+  if (found == symbols_.end())
+    throw std::runtime_error("Unknown replay product");
+  replay_.last_input = q.input_seq;
+  replay_.last_event_ns = q.event_time_ns;
+  if (q.operation == ReplayOp::New) {
+    const auto ordinal = q.order_id & order_ordinal_mask;
+    if (ordinal < replay_.next_order)
+      throw std::runtime_error("Reused replay order ID");
+    replay_.next_order = ordinal + 1;  // Consume even a business-rule rejection.
+    NewOrderRequest order{};
+    order.header = {MessageType::NewOrderRequest, sizeof(order), q.input_seq};
+    std::memcpy(order.symbol, q.symbol, sizeof(SymbolName));
+    order.side = q.side;
+    order.price = q.price;
+    order.quantity = q.quantity;
+    order.timeInForce = q.tif;
+    new_order(h, order, q.order_id);
+  } else if (q.operation == ReplayOp::Cancel) {
+    CancelRequest request{{MessageType::CancelRequest, sizeof(CancelRequest), q.input_seq},
+                          q.order_id};
+    cancel(h, request);
+  } else if (q.operation == ReplayOp::ReduceBy) {
+    auto* current = active_.find(q.order_id);
+    if (!current || current->user != h.user || q.quantity <= 0 ||
+        current->book != &books_[found->second] || current->state.side != q.side ||
+        q.quantity % current->book->quantity_step) {
+      ++replay_rejections_;
+      return;
+    }
+    ReduceRequest request{};
+    request.header = {MessageType::ReduceRequest, sizeof(request), q.input_seq};
+    request.orderId = q.order_id;
+    const Quantity requested = q.quantity;
+    const Quantity remaining = current->state.remainingQuantity;
+    request.newTotalQuantity =
+        current->state.filledQuantity + remaining - std::min(requested, remaining);
+    reduce(h, request);
+  } else {
+    throw std::runtime_error("Unknown replay operation");
+  }
 }
 
 void MatchingEngine::restore(std::span<const persistence::StoredOrder> orders,

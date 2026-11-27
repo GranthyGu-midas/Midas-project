@@ -273,8 +273,18 @@ void DurableEngine::poll() {
     history_->publish(boundary_.trade_end);
     service_checkpoint();
     hook(Stage::Emitting, boundary_.seq);
-    for (const auto& event : batch.result.events)
-      batch.emit(event.kind, event.context, {event.payload.data(), event.size});
+    for (const auto& event : batch.result.events) {
+      if (event.kind == LinkKind::ReplayReady) {
+        auto marker = copy_record<ReplayReady>({event.payload.data(), event.size});
+        marker.committed_seq = boundary_.seq;
+        batch.emit(event.kind, event.context, record_bytes(marker));
+        std::cout << "REPLAY_COMMITTED shard=" << marker.shard << " input=" << marker.input_seq
+                  << " source_time_ns=" << marker.event_time_ns << " batch=" << marker.committed_seq
+                  << " rejected_mutations=" << working_.replay_rejections() << std::endl;
+      } else {
+        batch.emit(event.kind, event.context, {event.payload.data(), event.size});
+      }
+    }
     // SnapshotEnd for C must enter the output stream before any event from C+1.
     emit_queries();
     pending_bytes_ -= batch.result.bytes();
@@ -320,6 +330,7 @@ void DurableEngine::command(const LinkHeader& h,
     if (executed_ == std::numeric_limits<std::uint64_t>::max())
       throw std::runtime_error("Persistence sequence exhausted");
     batch->b = {executed_ + 1, working_.next_order(), working_.next_trade(), 0, 0};
+    batch->b.replay = working_.replay_state();
     auto* handle = batch.get();
     pending_bytes_ += batch->result.bytes();
     pending_.push_back(std::move(batch));
@@ -414,12 +425,14 @@ void DurableEngine::replicate(const Frame& orders, const std::optional<Frame>& t
   if (orders.kind != Kind::Orders || orders.boundary.seq != executed_ + 1 ||
       orders.boundary.next_order < working_.next_order() ||
       orders.boundary.next_trade != working_.next_trade() + orders.trades ||
+      !replay_progresses(working_.replay_state(), orders.boundary.replay) ||
       bool(trades) != bool(orders.trades))
     throw std::runtime_error("Replication sequence/counter gap");
   if (trades && (trades->kind != Kind::Trades || trades->boundary.seq != orders.boundary.seq ||
                  trades->count != orders.trades || trades->trades != orders.trades ||
                  trades->boundary.next_order != orders.boundary.next_order ||
-                 trades->boundary.next_trade != orders.boundary.next_trade))
+                 trades->boundary.next_trade != orders.boundary.next_trade ||
+                 trades->boundary.replay != orders.boundary.replay))
     throw std::runtime_error("Replication parallel-log mismatch");
   while (pending_.size() >= options_.pending_slots ||
          pending_bytes_ > options_.pending_bytes - options_.command_bytes) {

@@ -81,11 +81,16 @@ void serve_order_engine(EngineBackend& book,
     }
     if (id != router || h.user > c.accounts.size() ||
         (h.kind != LinkKind::NewOrder && h.kind != LinkKind::Cancel && h.kind != LinkKind::Reduce &&
-         h.kind != LinkKind::Snapshot && h.kind != LinkKind::History)) {
+         h.kind != LinkKind::Snapshot && h.kind != LinkKind::History &&
+         h.kind != LinkKind::Replay)) {
       io.close(id);
       return;
     }
     ++commands;
+    if (h.kind == LinkKind::Replay && !dynamic_cast<persistence::DurableEngine*>(&book)) {
+      io.close(id);  // Never advertise a recovery point from a volatile engine.
+      return;
+    }
     book.command(h, bytes, [&, id](auto kind, const auto& context, const auto& payload) {
       links.send(id, kind, context, payload);
       ++events;

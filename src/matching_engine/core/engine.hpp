@@ -117,6 +117,7 @@ class MatchingEngine final : public EngineBackend {
   void update(const Order&, RequestId, const LinkHeader&, Timestamp = 0, UpdateReason = UpdateReason::Normal);
   void trade(const Order&, TradeId, Price, Quantity, Timestamp);
   void new_order(const LinkHeader&, const NewOrderRequest&, OrderId supplied_id = 0);
+  void replay(const LinkHeader&, const ReplayRequest&);
   void cancel(const LinkHeader&, const CancelRequest&, UpdateReason = UpdateReason::UserCancel);
   void reduce(const LinkHeader&, const ReduceRequest&);
   void snapshot(const LinkHeader&, const Header&);
