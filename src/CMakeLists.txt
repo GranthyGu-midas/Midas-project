@@ -31,6 +31,7 @@ add_subdirectory(client)
 add_subdirectory(gateway)
 add_subdirectory(matching_engine)
 add_subdirectory(publisher)
+add_subdirectory(chronoflow)
 
 # Normal builds contain runtime code only; demonstration and recovery tests are opt-in.
 option(MARKETLAB_BUILD_TESTS "Build demonstration, mailbox and recovery tests" OFF)
